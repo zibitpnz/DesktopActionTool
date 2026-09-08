@@ -84,8 +84,9 @@ tool("set_window_rect", "Move and resize the target window using physical screen
      ("x", "y", "width", "height"), changes=True, rules=[NEEDS_TARGET])
 tool("minimize_window", "Minimize the explicitly selected window.", READ, changes=True, rules=[NEEDS_TARGET])
 VERIFIED = {**ACTION, "verification_id": IDENTIFIER}
-tool("move_mouse", "Move to a previewed target. Supply its verification_id. By default return a cursor PNG: inspect it before a separate click.",
-     {**VERIFIED, "point": POINT, "coord_origin": ORIGIN, "relative": BOOL, "smooth": BOOL}, ("point",),
+tool("move_mouse", "Move to a previewed target using configured motion (smooth by default). Supply its verification_id. By default return a cursor PNG: inspect it before a separate click.",
+     {**VERIFIED, "point": POINT, "coord_origin": ORIGIN, "relative": BOOL,
+      "smooth": {**BOOL, "description": "Omit to use settings.json mcp_smooth_move_enabled (1 by default). true: smooth motion; false: instant jump. Overrides the setting for this call."}}, ("point",),
      changes=True, rules=[NEEDS_TARGET, NEEDS_VERIFICATION])
 for name in ("click_mouse", "double_click_mouse"):
     tool(name, "Press " + ("once" if name == "click_mouse" else "twice") + " at the verified cursor; requires the latest cursor PNG verification_id.",
@@ -184,8 +185,8 @@ def build_command(name, arguments):
                      (("width", "height") if name == "resize_window" else ("x", "y", "width", "height")))])
     if name == "move_mouse":
         argv.extend(["--mouse-move-relative" if a.get("relative") else "--mouse-move", str(a["point"]["x"]), str(a["point"]["y"])])
-        if a.get("smooth"):
-            argv.append("--smooth-move")
+        if "smooth" in a:
+            argv.append("--smooth-move" if a["smooth"] else "--no-smooth-move")
     if name in ("click_mouse", "double_click_mouse"):
         argv.extend(["--click" if name == "click_mouse" else "--double-click", a.get("button", "left")])
     if name == "drag_mouse":
@@ -237,6 +238,8 @@ resize_window, set_window_rect and minimize_window invalidate previous mouse ver
 """),
     "mouse": ("Mouse verification", "Preview, move, verify, click and drag sequences.", """# Mouse verification
 Every example uses the actual target obtained from windows/sessions. Coordinates are physical pixels: screen by default; window/client must be selected explicitly and kept consistent. Negative screen coordinates are valid on additional monitors.
+
+move_mouse follows settings.json mcp_smooth_move_enabled when smooth is omitted: 1 enables smooth motion (the default), 0 jumps instantly. Omit smooth to respect the user's setting; pass true or false only for an intentional override. Settings are read for each action. Smooth motion uses the configured duration, curve and slowdown; screenshot_delay_ms starts after motion ends.
 
 For a click:
 1. preview_target(target=target, point={x:150,y:180}, coord_origin="window"). Inspect the returned PNG. Save verification_id as P.
