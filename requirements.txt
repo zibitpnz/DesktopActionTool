@@ -1,5 +1,6 @@
 # Optional: required only for Windows UI Automation (--uia-* commands).
-# Version used in the documented verification environment.
+# Compatibility file for pip; keep in sync with pyproject.toml's uia extra.
+# The uv workflow uses pyproject.toml and uv.lock instead.
 uiautomation==2.0.29
 # Verified with the worker's in-memory COM type-library cache.
 comtypes==1.4.16

@@ -118,8 +118,10 @@ def import_uiautomation():
     except ImportError as exc:
         raise ActionError("UIA_UNAVAILABLE",
             "UI Automation support requires the 'uiautomation' package; "
-            "install it with: python -m pip install -r requirements.txt",
-            "install requirements.txt using the same Python interpreter"
+            "enable it with: uv sync --locked --extra uia; "
+            "or install it with: python -m pip install -r requirements.txt",
+            "run with uv run --locked --extra uia type_text.py; "
+            "or install requirements.txt using the same Python interpreter"
         ) from exc
     auto.Logger.SetLogFile("")
     return auto

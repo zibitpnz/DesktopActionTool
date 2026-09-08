@@ -2060,16 +2060,25 @@ def main() -> int:
     previous_args = CURRENT_ARGS
     args = None
     operation = None
+    controller = None
     try:
+        from controller_runtime import from_environment, check_recovery
+        controller = from_environment()
         args = parse_args()
         apply_settings(args)
         validate_args(args)
         CURRENT_ARGS = args
+        args.controller = controller
         initialize_dpi_awareness()
         resolve_window_selection(args)
         resolve_action_target(args)
+        if controller is not None:
+            controller.check()
+            if args.requires_target and not args.session_start:
+                controller.verify_session(args.expected_session)
         if window_mode(args) in SESSION_MODES:
             operation = Cancellation(is_escape_down, enabled=not args.no_abort_key)
+            operation.external_check = controller.check if controller else None
             result = session_command(args, ACTION_STATE_PATH.parent, check_cancelled=operation.check)
         elif args.dry_run:
             result = build_action_plan(args)
@@ -2086,13 +2095,22 @@ def main() -> int:
                 }
         elif window_mode(args) in READ_MODES:
             operation = Cancellation(is_escape_down, enabled=not args.no_abort_key)
+            operation.external_check = controller.check if controller else None
             operation.guard = check_selected_window
             with activity_scope(args, ACTION_STATE_PATH.parent, operation), operation_session(operation):
                 result = execute_action(args)
         else:
             with ActionLock(ACTION_STATE_PATH):
+                if args.requires_target:
+                    check_recovery(ACTION_STATE_PATH.parent)
+                if controller:
+                    controller.check()
+                    controller.verify_state(action_store())
                 try:
+                    if controller and args.requires_target:
+                        controller.begin_input(ACTION_STATE_PATH.parent)
                     operation = Cancellation(is_escape_down, enabled=not args.no_abort_key)
+                    operation.external_check = controller.check if controller else None
                     operation.guard = check_selected_window
                     with activity_scope(args, ACTION_STATE_PATH.parent, operation,
                                         create=window_mode(args) != "screenshot_window"), operation_session(operation):
@@ -2101,12 +2119,18 @@ def main() -> int:
                                 or window_mode(args) in {"focus_only", "resize_window", "set_window_rect", "minimize_window"}):
                             action_store().invalidate("window or input action changed the target context")
                         result = execute_action_with_screenshot(args)
+                    if controller:
+                        result = controller.prepare_result(result, action_store(), ACTION_STATE_PATH.parent,
+                                                           action_completed=args.requires_target and result.get("ok", False))
                 except (Exception, KeyboardInterrupt):
                     try:
                         action_store().invalidate("action failed or interrupted")
                     except OSError:
                         pass
                     raise
+                finally:
+                    if controller:
+                        controller.finish_input(sys.exc_info()[1])
         write_result(result)
         return 2 if result.get("aborted") else 0 if result.get("ok") else 1
     except (ActionAborted, KeyboardInterrupt) as exc:
@@ -2127,6 +2151,8 @@ def main() -> int:
         return 2 if getattr(exc, "aborted", False) else 1
     finally:
         CURRENT_ARGS = previous_args
+        if controller:
+            controller.close()
 
 
 def wait_control(args):
@@ -2196,6 +2222,10 @@ def resolve_action_target(args):
     if window_mode(args) in SESSION_MODES or args.list_windows or args.active_window:
         return
     session = bound_session(ACTION_STATE_PATH.parent)
+    controller = getattr(args, "controller", None)
+    if controller is not None and controller.payload.get("session_id") is not None:
+        controller.verify_session(session.get("session_id") if session else None)
+        args.expected_session = session["session_id"]
     target = session.get("target") if session else None
     if args.requires_target and session:
         args.expected_session = session["session_id"]

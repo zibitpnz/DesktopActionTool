@@ -13,6 +13,7 @@ __pycache__/
 /.action_state.tmp
 /.activity_session.json
 /.activity_session.tmp
+/.mcp_recovery.json
 
 # Local logs and temporary editor files.
 *.log
