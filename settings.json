@@ -11,6 +11,7 @@
   "scroll_jitter_px": 2,
   "min_click_hold_ms": 35,
   "max_click_hold_ms": 90,
+  "mcp_smooth_move_enabled": 1,
   "min_mouse_move_duration_ms": 350,
   "max_mouse_move_duration_ms": 900,
   "mouse_move_step_delay_ms": 12,

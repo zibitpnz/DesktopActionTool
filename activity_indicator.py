@@ -324,6 +324,10 @@ def session_command(args, directory, *, check_cancelled=lambda: None):
     with ActionLock(path):
         client = find_client(path)
         try:
+            controller = getattr(args, "controller", None)
+            if controller is not None and mode in ("session_end", "session_heartbeat"):
+                controller.verify_session(client.state["session_id"] if client and client.state["persistent"] else None)
+                check_cancelled()
             if mode == "session_start":
                 if client is not None:
                     raise ActionError("SESSION_EXISTS", "an activity session is already running", "end it before starting another")
@@ -359,7 +363,13 @@ def activity_scope(args, directory, operation, *, create=False):
     try:
         with ActionLock(path):
             client = find_client(path)
-            if getattr(args, "requires_target", False):
+            controller = getattr(args, "controller", None)
+            if (controller is not None and not getattr(args, "requires_target", False) and client is not None
+                    and client.state.get("session_id") != controller.payload.get("session_id")):
+                client.close()
+                client = None
+            if (getattr(args, "requires_target", False)
+                    or controller is not None and controller.payload.get("session_id") is not None):
                 expected = getattr(args, "expected_session", None)
                 actual = client.state["session_id"] if client and client.state["persistent"] else None
                 if expected != actual:

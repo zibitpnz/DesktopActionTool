@@ -39,9 +39,12 @@ class Cancellation:
         self.monitor = None
         self.target_guard = None
         self.input_guard = None
+        self.external_check = None
         self.actual_cursor = None
 
     def check(self):
+        if self.external_check is not None:
+            self.external_check()
         if self.enabled and self.escape_pressed():
             raise ActionAborted()
         if self.monitor is not None:
