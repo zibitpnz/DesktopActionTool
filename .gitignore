@@ -1,0 +1,21 @@
+# Python bytecode and local virtual environments.
+__pycache__/
+*.py[cod]
+/.venv/
+/venv/
+
+# Local development docs, tests, GUI helpers, CI archive, and publication audits.
+/_local_tools/
+
+# Runtime screenshots, mouse verification state, and activity session endpoint.
+/screenshots/
+/.action_state.json
+/.action_state.tmp
+/.activity_session.json
+/.activity_session.tmp
+
+# Local logs and temporary editor files.
+*.log
+*.tmp
+*.bak
+*~
