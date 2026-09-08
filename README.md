@@ -201,7 +201,7 @@ uv run --locked --extra mcp --extra uia mcp_server.py
 
 ### Подключение в Kilo Code
 
-Поддержка MCP включена в основную ветку `main` вместе с самостоятельным CLI. Текущая версия разработки — `0.2.0.dev0`. На компьютере с Windows скачайте инструмент в отдельный каталог и подготовьте окружение:
+Поддержка MCP включена в основную ветку `main` вместе с самостоятельным CLI. Текущая версия — `0.2.0`. На компьютере с Windows скачайте инструмент в отдельный каталог и подготовьте окружение:
 
 ```powershell
 git clone --branch main --single-branch https://github.com/zibitpnz/DesktopActionTool.git DesktopActionTool
