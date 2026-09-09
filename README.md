@@ -112,6 +112,46 @@ python .\type_text.py --window-id $windowId --coord-origin window --drag-to 400 
 
 ## Установка
 
+### Установщик для Windows
+
+Скачайте или распакуйте **весь проект** в отдельный каталог. Запустите [install.bat](install.bat) двойным щелчком: по умолчанию он устанавливает CLI, UI Automation и MCP, проверяет результат и ждёт Enter перед закрытием окна. Компоненты также можно выбрать из терминала:
+
+| Команда | Состав |
+| --- | --- |
+| `.\install.bat -Mode full` | CLI + UI Automation + MCP; режим по умолчанию |
+| `.\install.bat -Mode cli` | Только CLI со стандартными Windows API |
+| `.\install.bat -Mode uia` | CLI + UI Automation |
+| `.\install.bat -Mode mcp` | CLI + MCP без UI Automation |
+
+Основная логика находится в [install.ps1](install.ps1); BAT запускает Windows PowerShell без профиля с разрешением выполнения только для этого процесса. Проверено на Windows x64 и Windows PowerShell 5.1. При запуске с параметрами окно не задерживается; для паузы добавьте `-Pause`. Справка: `.\install.bat -Help`.
+
+Установщик проверяет наличие файлов и имя проекта рядом с собой, использует существующий uv версии 0.12.10 или новее и выполняет `uv sync --locked` с выбранными компонентами. Если uv отсутствует, загружается [uv 0.12.10 для Windows x64](https://github.com/astral-sh/uv/releases/tag/0.12.10): SHA-256 архива и `uv.exe` сверяются со значениями в скрипте. Резервный uv хранится в `.tools/`, которая исключена из Git. PATH не меняется. Python нужной версии при необходимости скачивает uv; его общий кэш и управляемые интерпретаторы используют стандартные каталоги uv в профиле пользователя.
+
+Окружение создаётся только в `.venv` этой копии инструмента. Чужая активированная среда не используется; `.venv` в виде ссылки на другую папку отклоняется. `uv.lock`, `settings.json` и настройки MCP-клиентов установщик не переписывает. При повторном запуске `-Mode` определяет новый состав среды: исключённые дополнительные пакеты удаляются. Перед обновлением окружения отключите использующий его MCP-сервер, затем подключите его снова.
+
+Дополнительные варианты:
+
+```powershell
+.\install.bat -Mode full -UvPath "C:\Tools\uv.exe"
+.\install.bat -Mode full -Offline
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -Mode full
+```
+
+`-Offline` требует уже доступных uv, Python и пакетов в кэше. При ошибке загрузки, установки или проверки возвращается ненулевой код завершения. Проверяются версии зависимостей, справка CLI, dry-run без ввода и загрузка модулей MCP/UIA. Установщик не управляет мышью и клавиатурой и не запускает постоянный MCP-сервер.
+
+После установки можно запускать инструмент напрямую, даже если uv отсутствует в PATH:
+
+```powershell
+.\.venv\Scripts\python.exe -B .\type_text.py --help
+.\.venv\Scripts\python.exe -B .\mcp_server.py --help
+```
+
+Для MCP-клиента используйте полный путь к `.venv\Scripts\python.exe` как команду и полный путь к `mcp_server.py` как аргумент. Установщик выводит оба пути. Форматы конфигурации показаны ниже; в примере Kilo массив `command` может выглядеть так:
+
+```json
+["C:/Projects/DesktopActionTool/.venv/Scripts/python.exe", "-B", "C:/Projects/DesktopActionTool/mcp_server.py"]
+```
+
 ### Через uv
 
 Один раз установите uv официальным установщиком для Windows:
@@ -201,7 +241,7 @@ uv run --locked --extra mcp --extra uia mcp_server.py
 
 ### Подключение в Kilo Code
 
-Поддержка MCP включена в основную ветку `main` вместе с самостоятельным CLI. Текущая версия — `0.2.0`. На компьютере с Windows скачайте инструмент в отдельный каталог и подготовьте окружение:
+Поддержка MCP включена в основную ветку `main` вместе с самостоятельным CLI. Текущая версия — `0.2.1`. На компьютере с Windows скачайте инструмент в отдельный каталог и подготовьте окружение:
 
 ```powershell
 git clone --branch main --single-branch https://github.com/zibitpnz/DesktopActionTool.git DesktopActionTool
@@ -313,6 +353,7 @@ CLI и MCP могут оставаться запущенными одновре
 | [screenshot_render.py](screenshot_render.py), [geometry.py](geometry.py) | PNG, линейки, детали и расчёты |
 | [configuration.py](configuration.py), [keymap.py](keymap.py) | Встроенные настройки и поддерживаемые клавиши |
 | [settings.json](settings.json) | Задержки, движение мыши и параметры снимков |
+| [install.bat](install.bat), [install.ps1](install.ps1) | Установка и проверка выбранных компонентов через uv |
 | [pyproject.toml](pyproject.toml) | Настройки uv-проекта и дополнительный набор зависимостей `uia` |
 | [uv.lock](uv.lock) | Зафиксированные версии и контрольные суммы зависимостей |
 | [.python-version](.python-version) | Выбранная версия Python для uv |

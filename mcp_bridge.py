@@ -18,7 +18,7 @@ from action_runtime import ActionError, ActionLock
 from controller_runtime import ControllerEvent, ENVIRONMENT_KEY, MAX_IMAGE_BYTES, RECOVERY_NAME
 from mcp_contract import SPECS, build_command
 
-SERVER_VERSION = "0.2.0"
+SERVER_VERSION = "0.2.1"
 READ_TOOLS = {"desktop_status", "list_windows", "active_window", "cursor_position", "capture_window",
               "preview_target", "list_controls", "wait_control", "session_status"}
 MAX_OUTPUT = 16 * 1024 * 1024

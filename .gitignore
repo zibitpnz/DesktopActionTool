@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 /.venv/
 /venv/
+/.tools/
 
 # Local development docs, tests, GUI helpers, CI archive, and publication audits.
 /_local_tools/
