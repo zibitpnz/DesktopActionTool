@@ -79,6 +79,9 @@ async def serve(bridge):
 
 def main():
     sys.dont_write_bytecode = True
+    from .maintenance import startup_allowed
+    if not startup_allowed(mcp=True):
+        return 1
     from .release_info import add_arguments, run_cli
     information = run_cli(sys.argv[1:])
     if information is not None:

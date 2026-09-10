@@ -52,6 +52,14 @@ $uvExecutableHash = 'a8bf95637ba520491de06713d718a55b90f18d127980b9531fd8fc5a8e9
 $savedEnvironment = @{}
 $installerExitCode = 1
 
+# Repairing dependencies during an incomplete update would destroy its backup
+# assumptions. Recovery is handled by the independent update script.
+if (Test-Path -LiteralPath (Join-Path $projectDirectory '.tools\updater\active.json')) {
+    [Console]::Error.WriteLine('An update needs recovery. Run update.bat -Status and -Rollback before install.bat.')
+    if ($Pause) { [void](Read-Host 'Press Enter to close') }
+    exit 1
+}
+
 function Assert-LocalDirectory([string]$Path) {
     $absolute = [IO.Path]::GetFullPath($Path)
     if (-not $absolute.StartsWith($projectDirectory + [IO.Path]::DirectorySeparatorChar,
@@ -148,7 +156,8 @@ try {
     if ($PSVersionTable.PSVersion.Major -lt 5) { throw 'PowerShell 5.1 or newer is required.' }
     # Validate this directory BEFORE uv can discover a project in a parent directory.
     foreach ($name in @('pyproject.toml', 'uv.lock', '.python-version', 'settings.json',
-                        'type_text.py', 'mcp_server.py',
+                        'type_text.py', 'mcp_server.py', 'update.bat', 'update.ps1',
+                        'desktop_action_tool/maintenance.py', 'desktop_action_tool/update_runtime.py',
                         'desktop_action_tool/__init__.py', 'desktop_action_tool/project_paths.py',
                         'desktop_action_tool/desktop_cli.py', 'desktop_action_tool/configuration.py',
                         'desktop_action_tool/action_runtime.py', 'desktop_action_tool/activity_indicator.py',

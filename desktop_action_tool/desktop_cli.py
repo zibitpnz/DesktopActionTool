@@ -17,6 +17,11 @@ from .project_paths import PROJECT_ROOT
 if any(flag in sys.argv for flag in ('--dry-run', '--version', '--check-updates')):
     sys.dont_write_bytecode = True
 
+if __name__ == '__main__':
+    from .maintenance import startup_allowed
+    if not startup_allowed():
+        raise SystemExit(1)
+
 from .action_runtime import ActionAborted, ActionError, ActionLock, ActionStore, Cancellation
 from .activity_indicator import activity_scope, session_command, bound_session
 from .selection import filter_windows, filter_controls, require_unique

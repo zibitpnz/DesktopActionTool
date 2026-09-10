@@ -5,6 +5,9 @@ import sys
 
 def main():
     sys.dont_write_bytecode = True
+    from desktop_action_tool.maintenance import startup_allowed
+    if not startup_allowed(mcp=True):
+        return 1
     from desktop_action_tool.mcp_server import main as run
     return run()
 
