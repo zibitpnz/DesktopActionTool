@@ -220,6 +220,10 @@ def from_environment():
 
 
 def check_recovery(directory):
+    from worker_client import UIA_RECOVERY_NAME
+    if (Path(directory) / UIA_RECOVERY_NAME).exists():
+        raise ActionError("UIA_RECOVERY_REQUIRED", "a direct UIA action has an unresolved outcome",
+                          "read the application state; do not replay; after resolving the outcome manually remove " + UIA_RECOVERY_NAME)
     if (Path(directory) / RECOVERY_NAME).exists():
         raise ActionError("INPUT_RECOVERY_REQUIRED", "a controlled action did not confirm input cleanup",
                           "inspect held keys/buttons, then manually remove " + RECOVERY_NAME)

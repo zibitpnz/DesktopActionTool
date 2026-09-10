@@ -865,6 +865,7 @@ def read_text(args: argparse.Namespace) -> str:
 
 
 def load_settings(path: str) -> dict[str, int]:
+    import uia_runtime
     settings = DEFAULT_SETTINGS.copy()
     config_path = Path(path)
 
@@ -877,6 +878,9 @@ def load_settings(path: str) -> dict[str, int]:
 
     for key in DEFAULT_SETTINGS:
         if key in raw_settings:
+            if key in uia_runtime.SETTINGS:
+                settings[key] = uia_runtime.number(raw_settings[key], *uia_runtime.SETTINGS[key], key)
+                continue
             if key in {"mcp_smooth_move_enabled", "screenshot_delay_ms", "activity_frame_enabled", "activity_frame_width_px",
                        "activity_frame_gradient_enabled", "activity_frame_opacity_percent",
                        "activity_frame_lead_ms", "activity_session_timeout_s"} and type(raw_settings[key]) is not int:
@@ -888,6 +892,8 @@ def load_settings(path: str) -> dict[str, int]:
 
 def apply_settings(args: argparse.Namespace, *, controlled: bool = False) -> None:
     settings = load_settings(args.config)
+    import uia_runtime
+    uia_runtime.apply_settings(args, settings)
     if settings["mcp_smooth_move_enabled"] not in (0, 1):
         raise ValueError("mcp_smooth_move_enabled must be 0 or 1")
     if args.smooth_move is None:
@@ -1005,8 +1011,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--uia-name", help="Exact UIA name for --uia-list-controls or --wait-control.")
     parser.add_argument("--uia-automation-id", help="Exact AutomationId for --uia-list-controls or --wait-control.")
     parser.add_argument("--wait-control", action="store_true", help="Wait for exactly one visible, enabled UIA control; does not focus or click.")
-    parser.add_argument("--timeout-s", type=float, default=5.0, help="Total timeout for UIA reads or waiting (default: 5 seconds).")
-    parser.add_argument("--poll-interval-ms", type=int, default=100, help="Delay between --wait-control queries (default: 100 ms).")
+    parser.add_argument("--timeout-s", type=float, help="Timeout for legacy UIA reads (5 s) or direct state waits (settings: 10 s).")
+    parser.add_argument("--poll-interval-ms", type=int, help="Delay between completed state queries (default: 100 ms).")
     parser.add_argument("--hotkey", help="One key or combination, e.g. Ctrl+S, Alt+Tab, Ctrl+Shift+Home.")
     parser.add_argument("--double-click", choices=("left", "right"), help="Double-click one verified target using the system double-click interval.")
     parser.add_argument("--screenshot-drag-target", nargs=2, type=int, metavar=("X", "Y"), help="Add drag destination (label 2) to a --screenshot-target preview (label 1).")
@@ -1186,7 +1192,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mouse-move-jitter-stop-distance-px", type=int)
     parser.add_argument("--mouse-move-slow-zone-distance-px", type=int)
     parser.add_argument("--mouse-move-slow-zone-min-speed-percent", type=int)
-    parser.add_argument("--initial-delay-s", type=float, default=3.0)
+    parser.add_argument("--initial-delay-s", type=float)
     parser.add_argument(
         "--newline",
         choices=("shift-enter", "enter", "unicode"),
@@ -1277,10 +1283,14 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--dry-run", action="store_true", help="Return a plan without input, window changes, or file writes.")
     parser.add_argument("--quiet", action="store_true", help="Do not write progress to stderr.")
+    import uia_runtime
+    uia_runtime.add_arguments(parser)
     return parser.parse_args()
 
 
 def validate_args(args: argparse.Namespace) -> None:
+    import uia_runtime
+    uia_runtime.validate(args)
     if args.activity_frame_gradient_enabled not in (0, 1):
         raise ValueError("activity_frame_gradient_enabled must be 0 or 1")
     if not 1 <= args.activity_frame_opacity_percent <= 100:
@@ -1305,7 +1315,7 @@ def validate_args(args: argparse.Namespace) -> None:
         if args.screenshot_window or window_mode(args) in READ_MODES or args.minimize_window:
             raise ValueError("--screenshot-after requires an input action, focus, resize, or window movement")
         if not (has_mouse_action(args) or has_keyboard_action(args) or text_source_count(args)
-                or args.focus_only or args.resize_window is not None or args.set_window_rect is not None):
+                or args.focus_only or args.resize_window is not None or args.set_window_rect is not None or args.uia_action):
             raise ValueError("--screenshot-after requires an action")
     if args.screenshot_drag_target is not None and (not args.screenshot_window or args.screenshot_target is None):
         raise ValueError("--screenshot-drag-target requires --screenshot-window and --screenshot-target")
@@ -1315,7 +1325,7 @@ def validate_args(args: argparse.Namespace) -> None:
             raise ValueError("--hotkey must be a separate keyboard command; verify text before sending Enter")
     if not math.isfinite(args.timeout_s) or args.timeout_s <= 0 or args.poll_interval_ms <= 0:
         raise ValueError("--timeout-s and --poll-interval-ms must be finite and positive")
-    if (args.uia_name is not None or args.uia_automation_id is not None) and not (args.uia_list_controls or args.wait_control):
+    if (args.uia_name is not None or args.uia_automation_id is not None) and not (args.uia_list_controls or args.wait_control or uia_runtime.mode(args)):
         raise ValueError("--uia-name and --uia-automation-id require --uia-list-controls or --wait-control")
     if args.wait_control and args.uia_name is None and args.uia_automation_id is None and not args.uia_control_types:
         raise ValueError("--wait-control requires a name, AutomationId, or control type")
@@ -1326,7 +1336,7 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--active-window cannot be combined with window selectors; use --list-windows")
     if args.window_title == "" or args.process_name == "":
         raise ValueError("window selectors must not be empty")
-    modes = [name for name in WINDOW_MODES if getattr(args, name)]
+    modes = [name for name in WINDOW_MODES if (getattr(args, name) is not None if name == 'wait_ms' else getattr(args, name))]
     if len(modes) > 1:
         raise ValueError("choose exactly one window/read mode")
     if modes and (has_mouse_action(args) or has_keyboard_action(args) or text_source_count(args)):
@@ -2003,13 +2013,14 @@ def type_text(args: argparse.Namespace, text: str) -> dict[str, object]:
     }
 
 
-READ_MODES = {"list_windows", "active_window", "cursor_position", "list_controls", "uia_list_controls", "wait_control"}
+READ_MODES = {"list_windows", "active_window", "cursor_position", "list_controls", "uia_list_controls", "wait_control",
+              "uia_control_state", "uia_wait_state", "wait_ms"}
 SESSION_MODES = {"session_start", "session_end", "session_status", "session_heartbeat"}
-WINDOW_MODES = READ_MODES | SESSION_MODES | {"focus_only", "resize_window", "set_window_rect", "minimize_window", "screenshot_window"}
+WINDOW_MODES = READ_MODES | SESSION_MODES | {"focus_only", "resize_window", "set_window_rect", "minimize_window", "screenshot_window", "uia_action"}
 
 
 def window_mode(args):
-    return next((name for name in sorted(WINDOW_MODES) if getattr(args, name)), None)
+    return next((name for name in sorted(WINDOW_MODES) if (getattr(args, name) is not None if name == 'wait_ms' else getattr(args, name))), None)
 
 
 def build_action_plan(args):
@@ -2074,6 +2085,7 @@ def main() -> int:
     args = None
     operation = None
     controller = None
+    operation_started = time.monotonic()
     try:
         from controller_runtime import from_environment, check_recovery
         controller = from_environment()
@@ -2093,6 +2105,10 @@ def main() -> int:
             operation = Cancellation(is_escape_down, enabled=not args.no_abort_key)
             operation.external_check = controller.check if controller else None
             result = session_command(args, ACTION_STATE_PATH.parent, check_cancelled=operation.check)
+        elif window_mode(args) in {"uia_control_state", "uia_wait_state", "uia_action", "wait_ms"}:
+            import uia_runtime
+            args.operation_started = operation_started
+            result = uia_runtime.execute(args, sys.modules[__name__])
         elif args.dry_run:
             result = build_action_plan(args)
             if args.requires_target and args.window_id is None:
@@ -2220,6 +2236,7 @@ def check_selected_window():
 
 def requires_target(args):
     return bool(has_mouse_action(args) or has_keyboard_action(args) or text_source_count(args)
+                or args.uia_action
                 or args.focus_only or args.resize_window is not None
                 or args.set_window_rect is not None or args.minimize_window)
 

@@ -17,10 +17,11 @@ import anyio
 from action_runtime import ActionError, ActionLock
 from controller_runtime import ControllerEvent, ENVIRONMENT_KEY, MAX_IMAGE_BYTES, RECOVERY_NAME
 from mcp_contract import SPECS, build_command
+from worker_client import UIA_RECOVERY_NAME
 
-SERVER_VERSION = "0.2.1"
+SERVER_VERSION = "0.3.0"
 READ_TOOLS = {"desktop_status", "list_windows", "active_window", "cursor_position", "capture_window",
-              "preview_target", "list_controls", "wait_control", "session_status"}
+              "preview_target", "list_controls", "wait_control", "session_status", "get_control_state", "wait_control_state", "wait"}
 MAX_OUTPUT = 16 * 1024 * 1024
 
 
@@ -63,7 +64,9 @@ class Bridge:
                     "busy": self.active is not None, "active_operation": self.active,
                     "last_operation": self.last, "owned_session_id": self.owned_session,
                     "input_recovery_required": self.uncertain or (self.directory / RECOVERY_NAME).exists(),
-                    "recovery_instructions": "if cleanup is unknown, inspect held input, remove " + RECOVERY_NAME + " and restart this server",
+                    "uia_recovery_required": (self.directory / UIA_RECOVERY_NAME).exists(),
+                    "recovery_instructions": "resolve UIA outcomes by reading application state before removing " + UIA_RECOVERY_NAME
+                        + "; for input cleanup inspect held keys/buttons before removing " + RECOVERY_NAME + "; restart this server afterwards",
                     "max_image_bytes": self.max_image_bytes, "scope": "one project copy in the current Windows desktop"}
 
     def cancel_all(self):
@@ -103,6 +106,14 @@ class Bridge:
             independent = name in {"session_status", "session_end", "session_heartbeat"}
             if self.active is not None and not independent:
                 return failure("BUSY", "another MCP operation is running; no action was queued"), []
+            if command.changes_desktop and not command.dry_run and (self.directory / UIA_RECOVERY_NAME).exists():
+                try:
+                    with ActionLock(self.directory / '.action_state.json'):
+                        if (self.directory / UIA_RECOVERY_NAME).exists():
+                            return failure("UIA_RECOVERY_REQUIRED", "a direct UIA action has an unresolved outcome",
+                                required_next_step="read the application state; do not replay; resolve " + UIA_RECOVERY_NAME + " and restart this server"), []
+                except ActionError as exc:
+                    return failure(exc.code, str(exc), required_next_step=exc.next_step), []
             if command.changes_desktop and not command.dry_run and (self.uncertain or (self.directory / RECOVERY_NAME).exists()):
                 return failure("INPUT_RECOVERY_REQUIRED", "input cleanup was not confirmed",
                                required_next_step="inspect held keys/buttons, then manually remove " + RECOVERY_NAME), []
@@ -129,6 +140,7 @@ class Bridge:
 
     def _run_process(self, job):
         command = job.command
+        job.controller.payload['operation_deadline'] = time.monotonic() + command.timeout
         argv = [*self.child_command, *command.argv]
         if command.name == "session_start":
             argv.append("--session-owner-pid=" + str(os.getpid()))
@@ -245,7 +257,8 @@ class Bridge:
                 self._mark_uncertain(job)
             with self.lock:
                 self.last = {"tool": job.command.name, **{key: job.result[key] for key in
-                             ("ok", "error_code", "completed", "typed_chars", "aborted", "action_completed", "controller_interrupted") if key in job.result}}
+                             ("ok", "error_code", "completed", "typed_chars", "aborted", "action_completed", "controller_interrupted",
+                              "execution_status", "effect_status", "completed_calls", "changed", "operation_id") if key in job.result}}
                 request_id = job.controller.payload["request_id"]
                 if self.active and self.active["request_id"] == request_id:
                     self.active = None
@@ -256,12 +269,13 @@ class Bridge:
     def _mark_uncertain(self, job):
         with self.lock:
             self.uncertain = True
-        path = self.directory / RECOVERY_NAME
+        direct = job.command.name == 'act_on_control'
+        path = self.directory / (UIA_RECOVERY_NAME if direct else RECOVERY_NAME)
         try:
             with ActionLock(self.directory / ".action_state.json"):
                 if not path.exists():
                     path.write_text(json.dumps({"request_id": job.controller.payload["request_id"],
-                        "status": "outcome-unknown", "required_next_step": "inspect held input before manually removing this file"}),
+                        "status": "outcome-unknown", "required_next_step": "read the control/application state before manually removing this file" if direct else "inspect held input before manually removing this file"}),
                         encoding="utf-8")
         except (OSError, ActionError):
             # An active child has its own recovery marker and the common mutex.

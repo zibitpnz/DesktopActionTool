@@ -139,7 +139,7 @@ try {
     # Validate this directory BEFORE uv can discover a project in a parent directory.
     foreach ($name in @('pyproject.toml', 'uv.lock', '.python-version', 'settings.json',
                         'type_text.py', 'desktop_cli.py', 'configuration.py', 'mcp_server.py',
-                        'mcp_bridge.py', 'mcp_contract.py')) {
+                        'mcp_bridge.py', 'mcp_contract.py', 'uia_actions.py', 'uia_runtime.py')) {
         if (-not (Test-Path -LiteralPath (Join-Path $projectDirectory $name) -PathType Leaf)) {
             throw "Missing $name next to install.ps1. Extract the complete DesktopActionTool project first."
         }

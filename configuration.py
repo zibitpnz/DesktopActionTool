@@ -37,6 +37,11 @@ VK_A = 0x41
 KEY_ACTION_PAUSE_SECONDS = 0.05
 
 DEFAULT_SETTINGS = {
+    "uia_action_before_delay_ms": 0,
+    "uia_action_after_delay_ms": 500,
+    "uia_call_timeout_s": 5.0,
+    "uia_wait_timeout_s": 10.0,
+    "uia_poll_interval_ms": 100,
     "verification_ttl_seconds": 120,
     "verification_tolerance_px": 0,
     "min_delay_ms": 50,
