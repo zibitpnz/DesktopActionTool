@@ -26,8 +26,8 @@ def main():
         request = json.load(sys.stdin)
         # Provider diagnostics must not corrupt the JSON protocol.
         with contextlib.redirect_stdout(sys.stderr):
-            import window_backend as windows
-            import controls_backend as controls
+            from . import window_backend as windows
+            from . import controls_backend as controls
             windows.initialize_dpi_awareness()
             try:
                 use_memory_com_cache()
@@ -50,7 +50,7 @@ def direct_main():
     def emit(message):
         output.write(json.dumps(message, ensure_ascii=True, allow_nan=False) + '\n')
         output.flush()
-    from worker_client import UIA_MESSAGE_LIMIT, write_uia_marker
+    from .worker_client import UIA_MESSAGE_LIMIT, write_uia_marker
     controls = None
     directory = operation_id = None
     while True:
@@ -66,8 +66,8 @@ def direct_main():
             with contextlib.redirect_stdout(sys.stderr):
                 command = request['command']
                 if command == 'init' and controls is None:
-                    from uia_actions import Controls
-                    import window_backend as windows
+                    from .uia_actions import Controls
+                    from . import window_backend as windows
                     windows.initialize_dpi_awareness()
                     try:
                         use_memory_com_cache()
@@ -83,6 +83,8 @@ def direct_main():
                     result = controls.inspect(request)
                 elif command == 'prepare':
                     _, result = controls.prepare(request)
+                elif command == 'pointer_geometry':
+                    result = controls.pointer_geometry(request)
                 elif command == 'perform':
                     def dispatch():
                         emit({'id': request_id, 'stage': 'dispatching'})

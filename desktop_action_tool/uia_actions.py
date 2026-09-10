@@ -1,5 +1,6 @@
-"""Direct UI Automation patterns. No mouse, keyboard, clipboard or image calls."""
-from action_runtime import ActionError
+"""UI Automation patterns and optional read-only pointer geometry. No input calls."""
+import math
+from .action_runtime import ActionError
 
 OPERATIONS = ("invoke", "set_value", "select", "set_toggle_state", "expand", "collapse")
 CONDITIONS = ("exists", "missing", "enabled", "disabled", "visible", "hidden", "value_equals",
@@ -143,18 +144,19 @@ def condition_matches(state, condition, value=None):
 
 class Controls:
     """One worker owns its COM apartment; all returned values are JSON data."""
-    def __init__(self, window, *, automation=None, identity=None, native_root=None):
+    def __init__(self, window, *, automation=None, identity=None, native_root=None, geometry_backend=None):
         if automation is None:
-            from controls_backend import import_uiautomation
+            from .controls_backend import import_uiautomation
             automation = import_uiautomation()
         if identity is None:
-            from window_backend import window_identity
+            from .window_backend import window_identity
             identity = window_identity
         self.auto, self.identity, self.window = automation, identity, window
         if native_root is None:
-            from win32_api import user32
+            from .win32_api import user32
             native_root = lambda handle: int(user32.GetAncestor(handle, 2) or 0)  # GA_ROOT, not GA_ROOTOWNER.
         self.native_root = native_root
+        self.geometry_backend = geometry_backend
 
     def check_window(self):
         if self.identity(self.window['window_id']) != self.window:
@@ -245,7 +247,151 @@ class Controls:
     def inspect(self, request):
         control = self.locate(request['selector'], request.get('expected_control'), request.get('max_depth', 16),
                               request.get('limit', 2000), request.get('allow_missing', False))
-        return self.snapshot(control, include_text=request.get('include_text', False), max_chars=request.get('max_chars', 4096))
+        state = self.snapshot(control, include_text=request.get('include_text', False), max_chars=request.get('max_chars', 4096))
+        if state is not None and request.get('include_geometry'):
+            try:
+                geometry = self.geometry(control)
+                state['geometry'] = {key: value for key, value in geometry.items() if key not in ('window_context', 'monitors')}
+            except Exception as exc:
+                state['geometry'] = {'coordinate_units': 'physical-pixels', 'pointer_point': None,
+                                     'error_code': getattr(exc, 'code', 'CONTROL_GEOMETRY_UNAVAILABLE')}
+                state['unavailable']['geometry'] = 'geometry could not be confirmed'
+        return state
+
+    def passive(self, control):
+        return (control.ControlTypeName in ('TextControl', 'ImageControl') and control.IsKeyboardFocusable is False
+                and not any(self.pattern(control, name) is not None for name in
+                            ('Invoke', 'Value', 'SelectionItem', 'Toggle', 'ExpandCollapse')))
+
+    def passive_descendants(self, control):
+        # A tree item's full bounds/clickable point may cover an independent child.
+        # Look only at its own decoration, never inside another interactive item.
+        pending = [(control.GetFirstChildControl(), 1)]
+        for _ in range(32):
+            if not pending:
+                return
+            child, depth = pending.pop()
+            if child is None:
+                continue
+            pending.append((child.GetNextSiblingControl(), depth))
+            if self.within_window(child) and self.passive(child):
+                yield child
+                if depth < 8:
+                    pending.append((child.GetFirstChildControl(), depth + 1))
+
+    def point_belongs(self, control, point):
+        """Accept the element itself or passive text/image descendants, fail closed."""
+        hit = self.auto.ControlFromPoint(point['x'], point['y'])
+        for _ in range(64):
+            if hit is None or not self.within_window(hit):
+                return False
+            if self.auto.ControlsAreSame(hit, control):
+                return True
+            if not self.passive(hit):
+                return False
+            hit = hit.GetParentControl()
+        return False
+
+    def geometry(self, control, *, expected=None, required=False):
+        # All UIA objects remain in this worker. Coordinates never authorize a click.
+        if self.geometry_backend is None:
+            from . import window_backend
+            from .input_backend import cursor_position
+            from types import SimpleNamespace
+            self.geometry_backend = SimpleNamespace(cursor_position=cursor_position, **{name: getattr(window_backend, name) for name in
+                ('verification_window_context', 'monitor_layout', 'root_window_at_point', 'active_window_id')})
+        native = self.geometry_backend
+        self.check_window()
+        self.check_membership(control)
+        raw = control.BoundingRectangle
+        rect = {key: getattr(raw, key) for key in ('left', 'top', 'right', 'bottom')}
+        if (any(type(v) not in (int, float) or not math.isfinite(v) or abs(v) > 2**31 - 1 for v in rect.values())
+                or rect['right'] <= rect['left'] or rect['bottom'] <= rect['top']):
+            fail('CONTROL_GEOMETRY_UNAVAILABLE', 'control has no finite positive bounding rectangle')
+        rect.update(width=rect['right'] - rect['left'], height=rect['bottom'] - rect['top'])
+        center = lambda area: {'x': math.floor((area['left'] + area['right']) / 2),
+                               'y': math.floor((area['top'] + area['bottom']) / 2)}
+        inside = lambda area, point: area['left'] <= point['x'] < area['right'] and area['top'] <= point['y'] < area['bottom']
+        data = {'coordinate_units': 'physical-pixels', 'screen_rect': rect, 'center_screen': center(rect),
+                'pointer_point': None, 'point_source': None}
+        if control.IsOffscreen is not False:
+            data['unavailable'] = 'control is offscreen or its visibility is unknown'
+        else:
+            context = native.verification_window_context(self.window['window_id'])
+            monitors = native.monitor_layout()
+            data.update(window_context=context, monitors=monitors)
+            def visible_center(bounds):
+                intersections = []
+                for monitor in monitors:
+                    areas = (bounds, rect, context['rect'], monitor['rect'])
+                    area = {key: fun(a[key] for a in areas) for key, fun in
+                            (('left', max), ('top', max), ('right', min), ('bottom', min))}
+                    if area['left'] < area['right'] and area['top'] < area['bottom']:
+                        intersections.append(area)
+                if not intersections:
+                    return None
+                area = max(intersections, key=lambda a: ((a['right']-a['left'])*(a['bottom']-a['top']), -a['left'], -a['top']))
+                return center(area)
+            def valid(point):
+                return (point is not None and all(type(v) is int for v in point.values())
+                        and inside(rect, point) and inside(context['rect'], point)
+                        and any(inside(m['rect'], point) for m in monitors)
+                        and native.root_window_at_point(point) == self.window['window_id'] and self.point_belongs(control, point))
+            if expected is not None:
+                if any(data[key] != expected[key] for key in ('screen_rect', 'window_context', 'monitors')):
+                    fail('CONTROL_CHANGED', 'control geometry or display context changed after pointer preparation')
+                point, source = expected['pointer_point'], expected['point_source']
+            else:
+                x, y, available = control.GetClickablePoint()
+                if type(available) is not bool:
+                    fail('CONTROL_POINT_UNAVAILABLE', 'provider returned an invalid clickable point')
+                if available and (type(x) is not int or type(y) is not int):
+                    fail('CONTROL_POINT_UNAVAILABLE', 'provider returned non-integer clickable coordinates')
+                point, source = ({'x': x, 'y': y}, 'clickable') if available else (None, 'visible-center')
+                if point is None:
+                    point = visible_center(rect)
+                if not valid(point):
+                    point = None
+                    for child in self.passive_descendants(control):
+                        if child.IsOffscreen is not False:
+                            continue
+                        raw_child = child.BoundingRectangle
+                        bounds = {key: getattr(raw_child, key) for key in ('left', 'top', 'right', 'bottom')}
+                        if (any(type(v) not in (int, float) or not math.isfinite(v) or abs(v) > 2**31 - 1 for v in bounds.values())
+                                or bounds['right'] <= bounds['left'] or bounds['bottom'] <= bounds['top']):
+                            continue
+                        candidate = visible_center(bounds)
+                        if valid(candidate):
+                            point, source = candidate, 'passive-descendant-center'
+                            break
+            if valid(point):
+                data.update(pointer_point=point, point_source=source)
+            else:
+                data['unavailable'] = 'point is outside the visible control or belongs to a different element/window'
+            if native.verification_window_context(self.window['window_id']) != context or native.monitor_layout() != monitors:
+                fail('CONTROL_CHANGED', 'window or display changed while reading geometry')
+        self.check_window()
+        self.check_membership(control)
+        if data['pointer_point'] is None and (required or expected is not None):
+            fail('CONTROL_POINT_UNAVAILABLE', data.get('unavailable', 'no confirmed pointer point'))
+        return data
+
+    def pointer_geometry(self, request):
+        control, prepared = self.prepare(request)
+        return {**prepared, 'geometry': None if prepared['noop'] else
+                self.geometry(control, expected=request.get('pointer_geometry'), required=True)}
+
+    def verify_pointer(self, control, expected):
+        self.geometry(control, expected=expected, required=True)
+        native = self.geometry_backend
+        try:
+            foreground = native.active_window_id()
+        except ValueError:
+            foreground = None
+        if foreground != self.window['window_id']:
+            fail('FOCUS_CHANGED', 'the accompanied UIA target is no longer in the foreground')
+        if native.cursor_position() != expected['pointer_point']:
+            fail('CURSOR_MOVED', 'cursor is no longer at the confirmed UIA point')
 
     def prepare(self, request):
         operation, value = request['operation'], request.get('value')
@@ -284,6 +430,8 @@ class Controls:
         control, prepared = self.prepare(request)
         if prepared['noop']:
             return {'called': False, 'prepared': prepared}
+        if request.get('pointer_geometry') is not None:
+            self.verify_pointer(control, request['pointer_geometry'])
         op = request['operation']
         pattern, method = {'invoke': ('Invoke', 'Invoke'), 'set_value': ('Value', 'SetValue'),
                            'select': ('SelectionItem', 'Select'), 'set_toggle_state': ('Toggle', 'Toggle'),
@@ -297,6 +445,8 @@ class Controls:
         self.check_membership(control)
         if list(control.GetRuntimeId()) != prepared['expected_control']['runtime_id']:
             fail('CONTROL_CHANGED', 'control identity changed immediately before invocation')
+        if request.get('pointer_geometry') is not None:
+            self.verify_pointer(control, request['pointer_geometry'])
         # A provider exception after entry does not prove that no effect happened.
         args = [request['value']] if op == 'set_value' else []
         result = getattr(interface, method)(*args, waitTime=0)

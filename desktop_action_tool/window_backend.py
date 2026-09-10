@@ -3,9 +3,9 @@ from __future__ import annotations
 import ctypes
 import time
 from pathlib import Path
-from action_runtime import ActionError
-from operation_runtime import interruptible_sleep, check_cancelled
-from configuration import (
+from .action_runtime import ActionError
+from .operation_runtime import interruptible_sleep, check_cancelled
+from .configuration import (
     SW_SHOW,
     SW_MINIMIZE,
     SW_RESTORE,
@@ -18,7 +18,7 @@ from configuration import (
     CAPTUREBLT,
 )
 
-from win32_api import (
+from .win32_api import (
     UINT,
     DWORD,
     POINT,
@@ -30,7 +30,7 @@ from win32_api import (
     EnumWindowsProc,
     hwnd,
 )
-import win32_api as api
+from . import win32_api as api
 
 
 
@@ -105,6 +105,30 @@ def verification_window_context(window_id: int) -> dict[str, object]:
 def root_window_at_point(point: dict[str, int]) -> int:
     handle = api.user32.WindowFromPoint(POINT(point["x"], point["y"]))
     return int(api.user32.GetAncestor(handle, 2) or handle or 0)
+
+
+def monitor_layout():
+    """Physical monitor rectangles and scale factors, without changing displays."""
+    shcore = ctypes.WinDLL('shcore', use_last_error=True)
+    scale_for = shcore.GetScaleFactorForMonitor
+    scale_for.argtypes, scale_for.restype = (ctypes.c_void_p, ctypes.POINTER(ctypes.c_int)), ctypes.c_long
+    callback_type = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(RECT), ctypes.c_ssize_t)
+    monitors, failed = [], []
+    def collect(handle, dc, rectangle, data):
+        scale = ctypes.c_int()
+        if scale_for(handle, ctypes.byref(scale)) < 0 or scale.value <= 0:
+            failed.append(True)
+            return False
+        rect = rectangle.contents
+        monitors.append({'id': hex(int(handle)), 'scale_percent': scale.value,
+                         'rect': {'left': rect.left, 'top': rect.top, 'right': rect.right, 'bottom': rect.bottom}})
+        return True
+    callback = callback_type(collect)
+    api.user32.EnumDisplayMonitors.argtypes = (ctypes.c_void_p, ctypes.c_void_p, callback_type, ctypes.c_ssize_t)
+    api.user32.EnumDisplayMonitors.restype = ctypes.c_int
+    if not api.user32.EnumDisplayMonitors(None, None, callback, 0) or failed or not monitors:
+        raise ActionError('DPI_UNSUPPORTED', 'cannot verify physical monitor layout and scaling')
+    return sorted(monitors, key=lambda monitor: monitor['id'])
 
 
 def get_window_text(window_id: int) -> str:
@@ -487,8 +511,9 @@ def focus_window(window_id: int) -> dict[str, object]:
 
 
 def capture_window_pixels(window_id: int) -> tuple[dict[str, int], bytes]:
-    from activity_indicator import capture_without_frame
-    with capture_without_frame():
+    from .activity_indicator import capture_without_frame
+    from .project_paths import PROJECT_ROOT
+    with capture_without_frame(), capture_without_frame(PROJECT_ROOT / 'screenshots/.image_store/.region_overlay.json'):
         return _capture_window_pixels(window_id)
 
 
@@ -500,6 +525,20 @@ def _capture_window_pixels(window_id: int) -> tuple[dict[str, int], bytes]:
         raise ValueError(f"window has invalid size: {width}x{height}")
     if api.user32.IsIconic(hwnd(window_id)):
         raise ValueError("cannot screenshot a minimized window")
+
+    return _capture_screen_pixels(rect)
+
+
+def capture_screen_pixels(rect):
+    """Capture an already validated physical rectangle, excluding service frames."""
+    from .activity_indicator import capture_without_frame
+    from .project_paths import PROJECT_ROOT
+    with capture_without_frame(), capture_without_frame(PROJECT_ROOT / 'screenshots/.image_store/.region_overlay.json'):
+        return _capture_screen_pixels(rect)
+
+
+def _capture_screen_pixels(rect):
+    width, height = rect['width'], rect['height']
 
     screen_dc = api.user32.GetDC(None)
     if not screen_dc:

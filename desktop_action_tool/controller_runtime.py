@@ -12,7 +12,7 @@ from pathlib import Path
 import re
 import uuid
 
-from action_runtime import ActionAborted, ActionError
+from .action_runtime import ActionAborted, ActionError
 
 ENVIRONMENT_KEY = "DESKTOPACTION_CONTROLLER"
 EVENT_PREFIX = "Local\\DesktopActionTool-Controller-"
@@ -220,7 +220,7 @@ def from_environment():
 
 
 def check_recovery(directory):
-    from worker_client import UIA_RECOVERY_NAME
+    from .worker_client import UIA_RECOVERY_NAME
     if (Path(directory) / UIA_RECOVERY_NAME).exists():
         raise ActionError("UIA_RECOVERY_REQUIRED", "a direct UIA action has an unresolved outcome",
                           "read the application state; do not replay; after resolving the outcome manually remove " + UIA_RECOVERY_NAME)

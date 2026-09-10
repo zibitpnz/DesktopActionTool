@@ -1,6 +1,6 @@
 [project]
 name = "desktopactiontool"
-version = "0.3.0"
+version = "0.4.0"
 description = "Windows desktop automation CLI with screenshots, UI Automation and guarded input."
 readme = "README.md"
 requires-python = ">=3.14,<3.15"
@@ -8,6 +8,7 @@ license = "MIT"
 dependencies = []
 
 [project.optional-dependencies]
+images = ["pillow==12.3.0"]
 mcp = ["mcp==2.2.0"]
 uia = [
     "uiautomation==2.0.29",

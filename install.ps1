@@ -2,7 +2,7 @@
 .SYNOPSIS
 Install DesktopActionTool into this project folder using uv and uv.lock.
 .DESCRIPTION
-The default mode installs CLI, UI Automation and MCP. No desktop input or
+The default mode installs CLI, UI Automation, MCP and image processing. No desktop input or
 client configuration changes are performed. Run again to update the environment.
 .EXAMPLE
 .\install.ps1 -Mode full
@@ -15,21 +15,24 @@ param(
     [string]$Mode = 'full',
     [string]$UvPath,
     [switch]$Offline,
+    [switch]$Images,
     [switch]$Pause,
     [switch]$Help
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
 
 if ($Help) {
     Write-Output @'
 DesktopActionTool installer (Windows x64, PowerShell 5.1+)
   install.bat                  Full install; wait for Enter before closing.
-  install.bat -Mode full        CLI + UI Automation + MCP (default).
+  install.bat -Mode full        CLI + UI Automation + MCP + images (default).
   install.bat -Mode cli         CLI only.
   install.bat -Mode uia         CLI + UI Automation.
   install.bat -Mode mcp         CLI + MCP, without UI Automation.
+  install.bat -Mode cli -Images CLI + image processing; also works with uia/mcp.
   install.bat -Offline          Use cached Python/packages and an existing uv.
   install.bat -UvPath C:\Tools\uv.exe
   install.bat -Help
@@ -105,7 +108,14 @@ function Get-UvExecutable {
     try {
         [Net.ServicePointManager]::SecurityProtocol = $oldProtocol -bor [Net.SecurityProtocolType]::Tls12
         $downloadUrl = "https://github.com/astral-sh/uv/releases/download/$uvVersion/uv-x86_64-pc-windows-msvc.zip"
-        Invoke-WebRequest -UseBasicParsing -Uri $downloadUrl -OutFile $archivePath -TimeoutSec 120
+        $curlExecutable = Join-Path $env:SystemRoot 'System32\curl.exe'
+        if (Test-Path -LiteralPath $curlExecutable -PathType Leaf) {
+            & $curlExecutable --fail --location --proto '=https' --proto-redir '=https' `
+                --connect-timeout 15 --max-time 120 --silent --show-error --output $archivePath $downloadUrl
+            if ($LASTEXITCODE -ne 0) { throw "uv download failed (curl exit $LASTEXITCODE)." }
+        } else {
+            Invoke-WebRequest -UseBasicParsing -Uri $downloadUrl -OutFile $archivePath -TimeoutSec 120
+        }
         if ((Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash -ne $uvArchiveHash) {
             throw 'Downloaded uv archive checksum mismatch; nothing was executed.'
         }
@@ -138,10 +148,26 @@ try {
     if ($PSVersionTable.PSVersion.Major -lt 5) { throw 'PowerShell 5.1 or newer is required.' }
     # Validate this directory BEFORE uv can discover a project in a parent directory.
     foreach ($name in @('pyproject.toml', 'uv.lock', '.python-version', 'settings.json',
-                        'type_text.py', 'desktop_cli.py', 'configuration.py', 'mcp_server.py',
-                        'mcp_bridge.py', 'mcp_contract.py', 'uia_actions.py', 'uia_runtime.py')) {
+                        'type_text.py', 'mcp_server.py',
+                        'desktop_action_tool/__init__.py', 'desktop_action_tool/project_paths.py',
+                        'desktop_action_tool/desktop_cli.py', 'desktop_action_tool/configuration.py',
+                        'desktop_action_tool/action_runtime.py', 'desktop_action_tool/activity_indicator.py',
+                        'desktop_action_tool/controller_runtime.py', 'desktop_action_tool/controls_backend.py',
+                        'desktop_action_tool/geometry.py', 'desktop_action_tool/input_backend.py',
+                        'desktop_action_tool/image_capture.py', 'desktop_action_tool/image_contract.py',
+                        'desktop_action_tool/image_geometry.py', 'desktop_action_tool/image_processing.py',
+                        'desktop_action_tool/image_runtime.py', 'desktop_action_tool/image_store.py',
+                        'desktop_action_tool/image_worker.py', 'desktop_action_tool/region_overlay.py',
+                        'desktop_action_tool/interaction_profiles.py', 'desktop_action_tool/keymap.py',
+                        'desktop_action_tool/mcp_server.py', 'desktop_action_tool/mcp_bridge.py',
+                        'desktop_action_tool/mcp_contract.py', 'desktop_action_tool/operation_runtime.py',
+                        'desktop_action_tool/release_info.py', 'desktop_action_tool/screenshot_render.py',
+                        'desktop_action_tool/selection.py', 'desktop_action_tool/uia_actions.py',
+                        'desktop_action_tool/uia_cursor.py', 'desktop_action_tool/uia_runtime.py',
+                        'desktop_action_tool/uia_worker.py', 'desktop_action_tool/win32_api.py',
+                        'desktop_action_tool/window_backend.py', 'desktop_action_tool/worker_client.py')) {
         if (-not (Test-Path -LiteralPath (Join-Path $projectDirectory $name) -PathType Leaf)) {
-            throw "Missing $name next to install.ps1. Extract the complete DesktopActionTool project first."
+            throw "Missing $name in the project containing install.ps1. Extract the complete DesktopActionTool project first."
         }
     }
     $projectText = Get-Content -LiteralPath (Join-Path $projectDirectory 'pyproject.toml') -Raw -Encoding utf8
@@ -173,6 +199,7 @@ try {
                      '--locked', '--no-default-groups', '--python', $pythonRequest)
     if ($Mode -in @('full', 'uia')) { $uvArguments += @('--extra', 'uia') }
     if ($Mode -in @('full', 'mcp')) { $uvArguments += @('--extra', 'mcp') }
+    if ($Mode -eq 'full' -or $Images) { $uvArguments += @('--extra', 'images') }
     if ($Offline) { $uvArguments += '--offline' }
     & $uvExecutable @uvArguments
     if ($LASTEXITCODE -ne 0) { throw "uv sync failed (exit $LASTEXITCODE). Installation did not complete." }
@@ -189,14 +216,15 @@ import sys
 import tomllib
 project = Path(sys.argv[1])
 mode = sys.argv[2]
+images = mode == 'full' or sys.argv[3] == 'True'
 sys.path.insert(0, str(project))
 expected_python = (project / '.python-version').read_text().strip()
 assert '.'.join(map(str, sys.version_info[:3])) == expected_python, 'Unexpected Python version'
 assert sys.maxsize > 2**32, '64-bit Python is required'
 assert Path(sys.prefix).resolve() == (project / '.venv').resolve(), 'Unexpected environment'
 config = tomllib.loads((project / 'pyproject.toml').read_text(encoding='utf-8'))
-for extra in ('uia', 'mcp'):
-    if mode in ('full', extra):
+for extra in ('uia', 'mcp', 'images'):
+    if mode in ('full', extra) or (extra == 'images' and images):
         for requirement in config['project']['optional-dependencies'][extra]:
             name, version = requirement.split('==')
             assert metadata.version(name) == version, 'Dependency version mismatch: ' + name
@@ -207,21 +235,32 @@ def check_cli(*args):
         raise RuntimeError(result.stdout.decode('utf-8', errors='replace') + result.stderr.decode('utf-8', errors='replace'))
     return result.stdout
 check_cli('--help')
+check_cli('--images-help')
+if images:
+    from PIL import Image
+    import io
+    with Image.new('RGB', (2, 2), 'blue') as image:
+        buffer = io.BytesIO()
+        image.save(buffer, format='PNG')
+        assert buffer.getvalue().startswith(b'\x89PNG\r\n\x1a\n'), 'PNG codec unavailable'
+assert json.loads(check_cli('--version'))['version'] == config['project']['version'], 'CLI version mismatch'
+update_plan = json.loads(check_cli('--check-updates', '--dry-run'))
+assert update_plan['ok'] and update_plan['status'] == 'not_checked', 'Update check dry-run failed'
 result = json.loads(check_cli('--text', 'Installation check', '--dry-run', '--quiet'))
 assert result['ok'] and result['typed_chars'] == 0, 'CLI dry-run failed'
 if mode in ('full', 'mcp'):
-    from mcp_bridge import Bridge, SERVER_VERSION
-    from mcp_server import create_server
+    from desktop_action_tool.mcp_bridge import Bridge, SERVER_VERSION
+    from desktop_action_tool.mcp_server import create_server
     assert SERVER_VERSION == config['project']['version'], 'MCP version mismatch'
     create_server(Bridge(project))
 if mode in ('full', 'uia'):
-    from uia_worker import use_memory_com_cache
+    from desktop_action_tool.uia_worker import use_memory_com_cache
     use_memory_com_cache()
-    from controls_backend import import_uiautomation
+    from desktop_action_tool.controls_backend import import_uiautomation
     import_uiautomation()
 print('Installation checks passed: DesktopActionTool ' + config['project']['version'])
 '@
-    & $pythonExecutable -B -c $probe $projectDirectory $Mode
+    & $pythonExecutable -B -c $probe $projectDirectory $Mode ([string][bool]$Images)
     if ($LASTEXITCODE -ne 0) { throw "Installation checks failed (exit $LASTEXITCODE)." }
     if ((Get-FileHash -LiteralPath $lockPath -Algorithm SHA256).Hash -ne $lockHash -or
         (Get-FileHash -LiteralPath $settingsPath -Algorithm SHA256).Hash -ne $settingsHash) {

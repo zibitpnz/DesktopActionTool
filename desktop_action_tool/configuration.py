@@ -37,6 +37,8 @@ VK_A = 0x41
 KEY_ACTION_PAUSE_SECONDS = 0.05
 
 DEFAULT_SETTINGS = {
+    "uia_cursor_follow_enabled": 0,
+    "uia_cursor_pause_ms": 250,
     "uia_action_before_delay_ms": 0,
     "uia_action_after_delay_ms": 500,
     "uia_call_timeout_s": 5.0,

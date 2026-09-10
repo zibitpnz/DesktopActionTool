@@ -6,12 +6,12 @@ import sys
 
 
 def main():
-    if "--dry-run" in sys.argv:
+    if any(flag in sys.argv for flag in ('--dry-run', '--version', '--check-updates')):
         sys.dont_write_bytecode = True
     if os.name != "nt":
         print(json.dumps({"ok": False, "error_code": "WINDOWS_REQUIRED", "error": "DesktopActionTool requires Windows"}))
         return 1
-    from desktop_cli import main as run
+    from desktop_action_tool.desktop_cli import main as run
     return run()
 
 

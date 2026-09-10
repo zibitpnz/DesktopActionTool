@@ -1,19 +1,19 @@
 """Read-only Win32 and UI Automation control enumeration."""
 from __future__ import annotations
-from action_runtime import ActionError
-from window_backend import (
+from .action_runtime import ActionError
+from .window_backend import (
     get_window_text,
     get_window_class,
     get_window_rect,
     screen_to_client_point,
     handle_int,
 )
-from configuration import CONTROL_OVERLAY_MAX_DEFAULT
+from .configuration import CONTROL_OVERLAY_MAX_DEFAULT
 
-from win32_api import EnumChildWindowsProc, hwnd
-import win32_api as api
+from .win32_api import EnumChildWindowsProc, hwnd
+from . import win32_api as api
 
-from geometry import rect_from_points, intersect_rects
+from .geometry import rect_from_points, intersect_rects
 
 
 def enumerate_window_controls(

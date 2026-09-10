@@ -1,5 +1,5 @@
 """Exact window and control selectors, independent of Windows APIs."""
-from action_runtime import ActionError
+from .action_runtime import ActionError
 
 
 def filter_windows(windows, title=None, process_name=None):

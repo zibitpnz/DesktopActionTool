@@ -12,12 +12,15 @@ import os
 from pathlib import Path
 import re
 import subprocess
+
+from .project_paths import PROJECT_ROOT
 import sys
+import threading
 import time
 import uuid
 
-from action_runtime import ActionAborted, ActionError, ActionLock
-from win32_api import BITMAPINFO, BITMAPINFOHEADER
+from .action_runtime import ActionAborted, ActionError, ActionLock
+from .win32_api import BITMAPINFO, BITMAPINFOHEADER
 
 STATE_NAME = ".activity_session.json"
 CLASS_PREFIX = "DesktopActionToolActivity-"
@@ -154,7 +157,7 @@ def read_state(path):
         return None
     except (OSError, ValueError) as exc:
         raise ActionError("INDICATOR_STATE_INVALID", "cannot read activity session state") from exc
-    if (not isinstance(state, dict) or state.get("version") != 1
+    if (not isinstance(state, dict) or state.get("version") not in (1, 2)
             or not re.fullmatch(r"[0-9a-f]{32}", str(state.get("session_id", "")))
             or any(type(state.get(key)) is not int or state[key] <= 0 for key in ("hwnd", "pid", "created"))
             or type(state.get("persistent")) is not bool):
@@ -164,6 +167,9 @@ def read_state(path):
             type(target.get(key)) is not int or target[key] <= 0
             for key in ("window_id", "process_id", "process_created"))):
         raise ActionError("INDICATOR_STATE_INVALID", "invalid activity session target")
+    from .interaction_profiles import state_profile
+    if state_profile(state) is not None and target is None:
+        raise ActionError('INDICATOR_STATE_INVALID', 'profiled session has no target binding')
     return state
 
 
@@ -200,7 +206,7 @@ class Client:
         if not self.native.user.SendMessageTimeoutW(self.state["hwnd"], MESSAGE, command, os.getpid(),
                                                     0x0002 | 0x0020, timeout, ctypes.byref(result)):
             raise ActionError("INDICATOR_UNAVAILABLE", "activity frame did not respond")
-        if not result.value:
+        if not result.value and not (command == PING and self.state.get('profile') == 'background'):
             raise ActionError("INDICATOR_UNAVAILABLE", "activity frame rejected the request")
         return result.value
 
@@ -253,7 +259,10 @@ def find_client(path):
 def describe(client, monitor_count):
     return {**{key: client.state.get(key) for key in
                ("session_id", "pid", "persistent", "timeout_s", "owner_pid")},
-            "monitor_count": monitor_count, "target": client.state.get("target")}
+            "monitor_count": monitor_count, "target": client.state.get("target"),
+            "profile": client.state.get('profile'),
+            "escape_cancels": client.state.get('profile') != 'background' and client.state.get('abort_on_escape', True),
+            "activity_frame": client.state.get('profile') != 'background'}
 
 
 def bound_session(directory):
@@ -277,9 +286,11 @@ def start_worker(path, args, *, persistent, check_cancelled=lambda: None):
                "gradient": args.activity_frame_gradient_enabled,
                "opacity": args.activity_frame_opacity_percent,
                "target": getattr(args, "selected_identity", None),
+               "profile": getattr(args, 'interaction_profile', None),
                "owner_pid": args.session_owner_pid if persistent else os.getpid(),
                "abort_on_escape": not args.no_abort_key}
-    process = subprocess.Popen([sys.executable, "-B", str(Path(__file__).resolve()), "--worker"],
+    process = subprocess.Popen([sys.executable, "-B", "-m", "desktop_action_tool.activity_indicator", "--worker"],
+                               cwd=PROJECT_ROOT,
                                stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                                text=True, encoding="utf-8", creationflags=subprocess.CREATE_NO_WINDOW,
                                env={**os.environ, "PYTHONUTF8": "1", "PYTHONDONTWRITEBYTECODE": "1"})
@@ -299,6 +310,9 @@ def start_worker(path, args, *, persistent, check_cancelled=lambda: None):
                 except BaseException:
                     client.close()
                     raise
+                # Retain/reap our child while this controller is alive; do not
+                # block a command on a persistent session's lifetime.
+                threading.Thread(target=process.wait, daemon=True).start()
                 return client
             time.sleep(0.02)
         raise ActionError("INDICATOR_START_FAILED", "activity frame startup timed out")
@@ -320,6 +334,7 @@ def session_command(args, directory, *, check_cancelled=lambda: None):
         return {"ok": True, "mode": "session-dry-run", "planned_action": mode.replace("_", "-"),
                 "timeout_s": args.session_timeout_s, "owner_pid": args.session_owner_pid, "dry_run": True,
                 "target": getattr(args, "selected_identity", None),
+                "profile": getattr(args, 'interaction_profile', None),
                 "executable": mode != "session_start" or getattr(args, "selected_identity", None) is not None}
     with ActionLock(path):
         client = find_client(path)
@@ -360,9 +375,13 @@ def activity_scope(args, directory, operation, *, create=False):
     client = None
     previous = CURRENT_CLIENT
     started = False
+    joined = False
     try:
         with ActionLock(path):
             client = find_client(path)
+            from .interaction_profiles import check_binding
+            check_binding(args, client.state if client else None)
+            operation.interaction_profile = getattr(args, 'interaction_profile', None)
             controller = getattr(args, "controller", None)
             if (controller is not None and not getattr(args, "requires_target", False) and client is not None
                     and client.state.get("session_id") != controller.payload.get("session_id")):
@@ -381,13 +400,14 @@ def activity_scope(args, directory, operation, *, create=False):
                 started = True
             if client is not None:
                 client.request(BEGIN)
+                joined = True
         CURRENT_CLIENT = client
         operation.monitor = client.check if client else None
         if started:
             operation.wait(args.activity_frame_lead_ms / 1000)
         yield client
     except BaseException:
-        if client is not None:
+        if client is not None and (joined or started):
             try:
                 client.stop()
             except (Exception, KeyboardInterrupt):
@@ -407,11 +427,11 @@ def activity_scope(args, directory, operation, *, create=False):
 
 
 @contextmanager
-def capture_without_frame():
-    client = CURRENT_CLIENT
+def capture_without_frame(path=None):
+    client = CURRENT_CLIENT if path is None else None
     temporary = False
     if client is None:
-        client = find_client(Path(__file__).resolve().with_name(STATE_NAME))
+        client = find_client(path or PROJECT_ROOT / STATE_NAME)
         temporary = client is not None
     if client is None:
         yield
@@ -443,15 +463,22 @@ class Lease:
 
 
 class FrameWorker:
+    state_name = STATE_NAME
+
     def __init__(self, payload):
         self.payload = payload
         self.path = Path(payload["path"]).resolve()
-        if self.path.name != STATE_NAME or not re.fullmatch(r"[0-9a-f]{32}", payload["session_id"]):
+        if self.path.name != self.state_name or not re.fullmatch(r"[0-9a-f]{32}", payload["session_id"]):
             raise ValueError("invalid activity worker path or identifier")
         if not 1 <= payload["timeout_s"] <= 86400 or not 1 <= payload["width"] <= 32:
             raise ValueError("invalid activity worker settings")
         if payload["gradient"] not in (0, 1) or not 1 <= payload["opacity"] <= 100:
             raise ValueError("invalid activity frame transparency settings")
+        from .interaction_profiles import PROFILES
+        if payload.get('profile') is not None and payload['profile'] not in PROFILES:
+            raise ValueError('invalid interaction profile')
+        if payload.get('profile') == 'background':
+            payload['abort_on_escape'] = False
         self.api = Native()
         self.owner = ProcessWatch(self.api, payload["owner_pid"]) if payload["owner_pid"] else None
         self.lease = Lease(payload["timeout_s"])
@@ -673,13 +700,16 @@ class FrameWorker:
                                                         0, 0, 0, 0, None, None, self.instance, None)
             if not self.control:
                 raise ctypes.WinError(ctypes.get_last_error())
-            self.rebuild(self.monitors())
+            if self.payload.get('profile') != 'background':
+                self.rebuild(self.monitors())
             process = ProcessWatch(self.api, os.getpid())
             try:
-                state = {"version": 1, "session_id": self.payload["session_id"], "hwnd": int(self.control),
+                state = {"version": 2 if self.payload.get('profile') else 1, "session_id": self.payload["session_id"], "hwnd": int(self.control),
                          "pid": os.getpid(), "created": process.created, "persistent": self.payload["persistent"],
                          "timeout_s": self.payload["timeout_s"], "owner_pid": self.payload["owner_pid"],
                          "target": self.payload.get("target"),
+                         "profile": self.payload.get('profile'),
+                         "abort_on_escape": self.payload['abort_on_escape'],
                          "monitor_count": len(self.frames)}
             finally:
                 process.close()
@@ -693,7 +723,7 @@ class FrameWorker:
                     self.api.user.TranslateMessage(ctypes.byref(message))
                     self.api.user.DispatchMessageW(ctypes.byref(message))
                 self.tick()
-                if self.running and time.monotonic() >= next_monitors:
+                if self.running and self.payload.get('profile') != 'background' and time.monotonic() >= next_monitors:
                     rectangles = self.monitors()
                     if rectangles != self.rectangles:
                         self.rebuild(rectangles)
@@ -724,6 +754,6 @@ class FrameWorker:
 if __name__ == "__main__":
     if sys.argv[1:] != ["--worker"]:
         raise SystemExit("Use type_text.py --session-start or --activity-frame")
-    from window_backend import initialize_dpi_awareness
+    from .window_backend import initialize_dpi_awareness
     initialize_dpi_awareness()
     FrameWorker(json.load(sys.stdin)).run()

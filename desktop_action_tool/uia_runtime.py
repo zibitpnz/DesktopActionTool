@@ -7,14 +7,15 @@ import sys
 import time
 import uuid
 
-from action_runtime import ActionAborted, ActionError
-from uia_actions import OPERATIONS, CONDITIONS, condition_matches, validate_selector, validate_expected, validate_condition
-from worker_client import UiaSession, UIA_RECOVERY_NAME, write_uia_marker
+from .action_runtime import ActionAborted, ActionError
+from .uia_actions import OPERATIONS, CONDITIONS, condition_matches, validate_selector, validate_expected, validate_condition
+from .worker_client import UiaSession, UIA_RECOVERY_NAME, write_uia_marker
 
 MODES = {'uia_control_state', 'uia_action', 'uia_wait_state', 'wait_ms'}
 SETTINGS = {'uia_action_before_delay_ms': (0, 60000, int), 'uia_action_after_delay_ms': (0, 60000, int),
             'uia_call_timeout_s': (0.1, 120, float), 'uia_wait_timeout_s': (0.1, 120, float),
-            'uia_poll_interval_ms': (20, 5000, int)}
+            'uia_poll_interval_ms': (20, 5000, int), 'uia_cursor_follow_enabled': (0, 1, int),
+            'uia_cursor_pause_ms': (0, 60000, int)}
 
 
 def number(value, low, high, kind, name):
@@ -29,7 +30,7 @@ def mode(args):
 
 
 def add_arguments(parser):
-    group = parser.add_argument_group('Direct UI Automation (no simulated input)')
+    group = parser.add_argument_group('Direct UI Automation (optional cursor motion, no simulated clicks or keys)')
     group.add_argument('--uia-control-state', action='store_true', help='Read one control and supported patterns as JSON.')
     group.add_argument('--uia-action', choices=OPERATIONS, help='Perform one direct UIA operation; never falls back to input.')
     group.add_argument('--uia-wait-state', choices=CONDITIONS, help='Wait for a control condition without input.')
@@ -49,9 +50,23 @@ def add_arguments(parser):
     group.add_argument('--uia-after-delay-ms', type=int, help='Pause after every confirmed action; defaults to settings (500 ms).')
     group.add_argument('--uia-call-timeout-s', type=float, help='Maximum time per UIA phase; defaults to settings (5 s).')
     group.add_argument('--operation-timeout-s', type=float, help='Total budget for direct UIA/wait, including all pauses; default 60 s.')
+    following = group.add_mutually_exclusive_group()
+    following.add_argument('--uia-cursor-follow', dest='uia_cursor_follow', action='store_true', default=None,
+                           help='Smoothly point at the UIA target before its pattern call; requires visible foreground target.')
+    following.add_argument('--no-uia-cursor-follow', dest='uia_cursor_follow', action='store_false',
+                           help='Disable cursor accompaniment for this action, overriding settings.')
+    group.add_argument('--uia-cursor-pause-ms', type=int, help='Pause after pointer arrival before the pattern; settings default 250 ms.')
+    group.add_argument('--uia-include-geometry', action='store_true', help='Read optional physical geometry with --uia-control-state; never moves the cursor.')
 
 
 def apply_settings(args, settings):
+    args.uia_cursor_explicit = args.uia_cursor_follow is not None or args.uia_cursor_pause_ms is not None
+    args.uia_cursor_pause_explicit = args.uia_cursor_pause_ms is not None
+    args.uia_smooth_explicit = args.smooth_move is not None
+    if args.uia_cursor_follow is None:
+        args.uia_cursor_follow = bool(args.uia_action and settings['uia_cursor_follow_enabled'])
+    if args.uia_cursor_pause_ms is None:
+        args.uia_cursor_pause_ms = settings['uia_cursor_pause_ms']
     args.initial_delay_explicit = args.initial_delay_s is not None
     if args.initial_delay_s is None:
         args.initial_delay_s = 3.0
@@ -75,13 +90,25 @@ def validate(args):
     direct = mode(args)
     extras = (args.uia_control_type is not None or args.uia_selector is not None or args.uia_expected_control is not None
               or args.uia_value is not None or args.uia_value_stdin or args.uia_condition_value is not None
-              or args.uia_expect is not None or args.uia_include_text or args.uia_timing_explicit)
+              or args.uia_expect is not None or args.uia_include_text or args.uia_timing_explicit
+              or args.uia_cursor_explicit or args.uia_include_geometry)
     if not direct:
         if extras:
             raise ValueError('direct UIA options require --uia-control-state, --uia-action, --uia-wait-state or --wait-ms')
         return
     if args.initial_delay_explicit:
         raise ValueError('use --uia-before-delay-ms for direct UIA, not --initial-delay-s')
+    if args.uia_smooth_explicit:
+        raise ValueError('direct UIA uses --uia-cursor-follow; accompaniment is always smooth')
+    if args.uia_cursor_explicit and not args.uia_action:
+        raise ValueError('cursor accompaniment options require --uia-action')
+    if args.uia_cursor_pause_explicit and not args.uia_cursor_follow:
+        raise ValueError('cursor pause requires enabled cursor accompaniment')
+    if args.uia_include_geometry and not args.uia_control_state:
+        raise ValueError('--uia-include-geometry requires --uia-control-state')
+    number(args.uia_cursor_pause_ms, 0, 60000, int, 'cursor_pause_ms')
+    if args.uia_cursor_follow and args.min_mouse_move_duration_ms <= 0:
+        raise ValueError('cursor accompaniment requires positive smooth movement duration')
     if args.uia_pause_explicit and not args.uia_action:
         raise ValueError('before/after pauses require --uia-action; use --wait-ms for a standalone pause')
     if args.uia_include_text and not args.uia_control_state:
@@ -128,7 +155,8 @@ def validate(args):
             raise ValueError('--uia-expect is an Invoke condition with selector, condition and optional value')
         validate_selector(args.uia_expect.get('selector'))
         validate_condition(args.uia_expect.get('condition'), args.uia_expect.get('value'))
-    if args.uia_action and (args.uia_before_delay_ms + args.uia_after_delay_ms) / 1000 + args.activity_frame_lead_ms / 1000 >= args.operation_timeout_s:
+    cursor_pause = args.uia_cursor_pause_ms if args.uia_cursor_follow else 0
+    if args.uia_action and (args.uia_before_delay_ms + args.uia_after_delay_ms + cursor_pause) / 1000 + args.activity_frame_lead_ms / 1000 >= args.operation_timeout_s:
         raise ValueError('operation timeout leaves no time after the configured pauses')
 
 
@@ -141,15 +169,20 @@ def plan(args):
                        'after_delay_ms': args.uia_after_delay_ms if args.uia_action else 0,
                        'call_timeout_s': args.uia_call_timeout_s, 'timeout_s': args.timeout_s,
                        'poll_interval_ms': args.poll_interval_ms, 'operation_timeout_s': args.operation_timeout_s},
+            **({'cursor_follow': {'enabled': args.uia_cursor_follow,
+                'status': 'planned' if args.dry_run and args.uia_cursor_follow else 'failed' if args.uia_cursor_follow else 'disabled',
+                'steps': 0, 'duration_ms': 0, 'pause_ms': 0, 'final_position': None,
+                'planned_pause_ms': args.uia_cursor_pause_ms if args.uia_cursor_follow else 0}} if args.uia_action else {}),
             **({'duration_ms': args.wait_ms} if args.wait_ms is not None else {})}
 
 
 class Runner:
-    def __init__(self, args, operation, directory, window, result, deadline, *, session_factory=None):
+    def __init__(self, args, operation, directory, window, result, deadline, *, session_factory=None, cli=None):
         self.args, self.operation, self.directory, self.window = args, operation, Path(directory), window
         self.result, self.deadline, self.session_factory = result, deadline, session_factory or UiaSession
         self.operation_id = result['operation_id']
         self.worker, self.pending = None, False
+        self.cli, self.cursor = cli, None
 
     def remaining(self):
         self.operation.check()
@@ -170,9 +203,9 @@ class Runner:
             raise ActionError('CONDITION_TIMEOUT', 'the control condition exceeded its deadline')
         return result
 
-    def query(self, selector, *, expected=None, text=False, budget=None):
+    def query(self, selector, *, expected=None, text=False, budget=None, geometry=False):
         return self.call('inspect', selector=selector, expected_control=expected, allow_missing=True,
-                         include_text=text, max_chars=max(self.args.uia_max_chars, len(self.args.uia_value or '')),
+                         include_text=text, include_geometry=geometry, max_chars=max(self.args.uia_max_chars, len(self.args.uia_value or '')),
                          max_depth=self.args.uia_search_depth, limit=self.args.uia_search_limit, budget=budget)
 
     def wait_for(self, expectation, expected=None, *, previous_toggle=None):
@@ -193,10 +226,15 @@ class Runner:
     def progress(self, message):
         if message['stage'] == 'dispatching':
             self.remaining()
+            if self.cursor:
+                self.cursor.check()
             write_uia_marker(self.directory, self.operation_id, 'dispatching', window=self.window,
                              operation=self.args.uia_action, completed_calls=self.result['completed_calls'])
             self.pending = True
             self.result.update(execution_status='unknown', changed=None)
+            if self.cursor:
+                # The provider may legitimately open a dialog/change focus once permitted.
+                self.cursor.deactivate()
         else:
             self.record_return(message['result'])
 
@@ -216,7 +254,8 @@ class Runner:
         self.worker = self.session_factory(self.operation.check)
         self.call('init', window=self.window, directory=str(self.directory), operation_id=self.operation_id)
         if a.uia_control_state:
-            state = self.query(a.uia_selector, expected=a.uia_expected_control, text=a.uia_include_text)
+            state = self.query(a.uia_selector, expected=a.uia_expected_control, text=a.uia_include_text,
+                               geometry=a.uia_include_geometry)
             if state is None:
                 raise ActionError('CONTROL_NOT_FOUND', 'no control matches the selector')
             self.result['control'] = state
@@ -238,11 +277,27 @@ class Runner:
         self.result['noop'] = prepared['noop']
         seen = {prepared['control'].get('toggle_state')}
         previous_toggle = prepared['control'].get('toggle_state')
+        if not prepared['noop'] and a.uia_cursor_follow:
+            from .uia_cursor import CursorFollow
+            pointer = self.call('pointer_geometry', **request)
+            prepared['noop'] = self.result['noop'] = pointer['noop']
+            if not pointer['noop']:
+                request['pointer_geometry'] = pointer['geometry']
+                self.cursor = CursorFollow(a, self.cli, self.operation, self.result['cursor_follow'], pointer['geometry'])
+                self.cursor.run()
         if prepared['noop']:
+            if a.uia_cursor_follow:
+                self.result['cursor_follow']['status'] = 'skipped_noop'
             self.operation.wait(a.uia_after_delay_ms / 1000)
         else:
             for _ in range(3 if a.uia_action == 'set_toggle_state' else 1):
+                if self.cursor:
+                    self.cursor.activate()
                 answer = self.call('perform', progress=self.progress, **request)
+                if self.cursor:
+                    self.cursor.deactivate()
+                if not answer.get('called'):
+                    self.result['noop'] = self.result['completed_calls'] == 0
                 if answer.get('called') and not answer.get('provider_ok'):
                     raise ActionError('UIA_PROVIDER_FAILED', 'the pattern call returned an unsuccessful result', 'inspect the application before another action')
                 self.operation.wait(a.uia_after_delay_ms / 1000)
@@ -270,6 +325,8 @@ class Runner:
         self.result['action_completed'] = self.result['execution_status'] == 'returned'
 
     def close(self):
+        if self.cursor:
+            self.cursor.close()
         if self.worker:
             self.worker.close()
         marker = self.directory / UIA_RECOVERY_NAME
@@ -294,6 +351,7 @@ def execute(args, cli):
         deadline = min(deadline, controller.payload['operation_deadline'])
     result['operation_id'] = uuid.uuid4().hex
     operation = cli.Cancellation(cli.is_escape_down, enabled=not args.no_abort_key)
+    operation.interaction_profile = getattr(args, 'interaction_profile', None)
     def check():
         if controller:
             controller.check()
@@ -314,7 +372,7 @@ def execute(args, cli):
             operation.guard = cli.check_selected_window
         with cli.ActionLock(cli.ACTION_STATE_PATH) if args.uia_action else nullcontext():
             if args.uia_action:
-                from controller_runtime import check_recovery
+                from .controller_runtime import check_recovery
                 check_recovery(cli.ACTION_STATE_PATH.parent)
                 if controller:
                     controller.verify_session(args.expected_session)
@@ -323,7 +381,7 @@ def execute(args, cli):
                 if args.wait_ms is not None:
                     operation.wait(args.wait_ms / 1000)
                 else:
-                    runner = Runner(args, operation, cli.ACTION_STATE_PATH.parent, window, result, deadline)
+                    runner = Runner(args, operation, cli.ACTION_STATE_PATH.parent, window, result, deadline, cli=cli)
                     try:
                         runner.run()
                     finally:

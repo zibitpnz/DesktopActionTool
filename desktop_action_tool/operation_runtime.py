@@ -2,7 +2,7 @@
 from contextlib import contextmanager
 import time
 import sys
-from action_runtime import ActionAborted, ActionError
+from .action_runtime import ActionAborted, ActionError
 
 CURRENT_OPERATION = None
 
@@ -29,7 +29,7 @@ def count_completed(name: str, amount: int = 1) -> None:
 
 @contextmanager
 def operation_session(operation):
-    from input_backend import send_input
+    from .input_backend import send_input
     global CURRENT_OPERATION
     previous = CURRENT_OPERATION
     CURRENT_OPERATION = operation

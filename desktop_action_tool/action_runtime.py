@@ -41,6 +41,7 @@ class Cancellation:
         self.input_guard = None
         self.external_check = None
         self.actual_cursor = None
+        self.cursor_observer = None
 
     def check(self):
         if self.external_check is not None:

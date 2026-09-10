@@ -3,13 +3,13 @@ from __future__ import annotations
 import ctypes
 import random
 import time
-from operation_runtime import (
+from .operation_runtime import (
     check_cancelled,
     interruptible_sleep,
     count_completed,
     current_operation,
 )
-from configuration import (
+from .configuration import (
     INPUT_KEYBOARD,
     INPUT_MOUSE,
     KEYEVENTF_KEYUP,
@@ -27,10 +27,10 @@ from configuration import (
     VK_A,
 )
 
-from win32_api import KEYBDINPUT, MOUSEINPUT, INPUT_UNION, INPUT, POINT
-import win32_api as api
+from .win32_api import KEYBDINPUT, MOUSEINPUT, INPUT_UNION, INPUT, POINT
+from . import win32_api as api
 
-from geometry import ease_in_out
+from .geometry import ease_in_out
 
 
 def send_input(*inputs: INPUT) -> None:
@@ -46,6 +46,10 @@ def send_input(*inputs: INPUT) -> None:
     if kinds:
         check_cancelled()
         operation = current_operation()
+        if operation is not None:
+            from .interaction_profiles import check_input
+            for kind in sorted(kinds):
+                check_input(getattr(operation, 'interaction_profile', None), kind)
         if operation is not None and operation.input_guard is not None:
             for kind in sorted(kinds):
                 operation.input_guard(kind, None)
@@ -85,11 +89,16 @@ def cursor_position() -> dict[str, int]:
 def set_cursor_position(x: int, y: int) -> None:
     check_cancelled()
     operation = current_operation()
+    if operation is not None:
+        from .interaction_profiles import check_input
+        check_input(getattr(operation, 'interaction_profile', None), 'move')
     if operation is not None and operation.input_guard is not None:
         operation.input_guard("move", {"x": x, "y": y})
     if not api.user32.SetCursorPos(x, y):
         error = ctypes.get_last_error()
         raise OSError(error, f"SetCursorPos failed for x={x}, y={y}")
+    if operation is not None and operation.cursor_observer is not None:
+        operation.cursor_observer({'x': x, 'y': y})
 
 
 def smooth_set_cursor_position(
@@ -126,30 +135,30 @@ def smooth_set_cursor_position(
     distance = max((dx * dx + dy * dy) ** 0.5, 1)
     normal_x = -dy / distance
     normal_y = dx / distance
-    curve_px = random.uniform(-0.18, 0.18) * min(distance, 320)
+    # Choose one continuous lateral path. Independent x/y noise at every step
+    # makes a short move wander backwards and looks like a trembling hand.
+    approach_distance = max(distance - jitter_stop_distance_px, 0)
+    curve_px = random.uniform(-0.18, 0.18) * min(approach_distance, 320) * min(approach_distance / 200, 1)
+    jitter_limit = min(jitter_px, approach_distance * 0.02)
+    jitter_start = random.uniform(-jitter_limit, jitter_limit) if jitter_limit else 0
+    jitter_end = random.uniform(-jitter_limit, jitter_limit) if jitter_limit else 0
 
     for step in range(1, step_count + 1):
         check_cancelled()
         t = step / step_count
         eased = ease_in_out(t)
-        curve = 4 * t * (1 - t) * curve_px
+        curve = 4 * eased * (1 - eased) * (curve_px + (1 - eased) * jitter_start + eased * jitter_end)
 
         base_x = start_x + dx * eased
         base_y = start_y + dy * eased
         distance_to_target = ((target_x - base_x) ** 2 + (target_y - base_y) ** 2) ** 0.5
-        use_precision_zone = distance_to_target <= jitter_stop_distance_px
         use_slow_zone = slow_zone_distance_px > 0 and distance_to_target <= slow_zone_distance_px
-
-        if use_precision_zone:
-            x = base_x
-            y = base_y
-        else:
-            x = base_x + normal_x * curve
-            y = base_y + normal_y * curve
-
-        if step < step_count and jitter_px > 0 and not use_precision_zone:
-            x += random.uniform(-jitter_px, jitter_px)
-            y += random.uniform(-jitter_px, jitter_px)
+        # Fade before the precision boundary instead of snapping from the arc
+        # to the straight line. Easing gives zero slope at both fade endpoints.
+        fade = ease_in_out(max(0, min(1, (distance_to_target - jitter_stop_distance_px)
+                                     / max(jitter_stop_distance_px, min(distance, 320) / 2, 1))))
+        x = base_x + normal_x * curve * fade
+        y = base_y + normal_y * curve * fade
 
         set_cursor_position(round(x), round(y))
         count_completed("mouse_steps")

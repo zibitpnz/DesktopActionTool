@@ -8,7 +8,8 @@ import ctypes
 import queue
 import threading
 
-from action_runtime import ActionError
+from .action_runtime import ActionError
+from .project_paths import PROJECT_ROOT
 
 UIA_RECOVERY_NAME = '.uia_recovery.json'
 # Value and Text can each contain 65536 non-BMP characters (12 JSON bytes each).
@@ -69,7 +70,8 @@ class UiaSession:
         self.check, self.counter, self.job = check, 0, None
         self.incoming, self.outgoing = queue.Queue(maxsize=16), queue.Queue(maxsize=4)
         self.failed = threading.Event()
-        self.process = subprocess.Popen(command or [sys.executable, '-B', str(Path(__file__).with_name('uia_worker.py')), '--direct'],
+        self.process = subprocess.Popen(command or [sys.executable, '-B', '-m', 'desktop_action_tool.uia_worker', '--direct'],
+            cwd=PROJECT_ROOT if command is None else None,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
         self.threads = []
@@ -181,8 +183,10 @@ class UiaSession:
 def run_uia_worker(request, timeout, check_cancelled, *, command=None):
     deadline = time.monotonic() + timeout
     check_cancelled()
-    command = command or [sys.executable, "-B", str(Path(__file__).with_name("uia_worker.py"))]
+    directory = PROJECT_ROOT if command is None else None
+    command = command or [sys.executable, "-B", "-m", "desktop_action_tool.uia_worker"]
     process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                               cwd=directory,
                                stderr=subprocess.PIPE, text=True, encoding="utf-8",
                                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     try:

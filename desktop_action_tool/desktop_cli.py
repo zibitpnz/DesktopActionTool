@@ -12,23 +12,25 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-if "--dry-run" in sys.argv:
+from .project_paths import PROJECT_ROOT
+
+if any(flag in sys.argv for flag in ('--dry-run', '--version', '--check-updates')):
     sys.dont_write_bytecode = True
 
-from action_runtime import ActionAborted, ActionError, ActionLock, ActionStore, Cancellation
-from activity_indicator import activity_scope, session_command, bound_session
-from selection import filter_windows, filter_controls, require_unique
-from worker_client import run_uia_worker
-from keymap import parse_hotkey
+from .action_runtime import ActionAborted, ActionError, ActionLock, ActionStore, Cancellation
+from .activity_indicator import activity_scope, session_command, bound_session
+from .selection import filter_windows, filter_controls, require_unique
+from .worker_client import run_uia_worker
+from .keymap import parse_hotkey
 
-from operation_runtime import (
+from .operation_runtime import (
     check_cancelled,
     interruptible_sleep,
     count_completed,
     operation_session,
     current_operation,
 )
-from window_backend import (
+from .window_backend import (
     initialize_dpi_awareness,
     window_identity,
     verification_window_context,
@@ -49,7 +51,7 @@ from window_backend import (
     focus_window,
     capture_window_pixels,
 )
-from input_backend import (
+from .input_backend import (
     send_input,
     cursor_position,
     set_cursor_position,
@@ -65,9 +67,9 @@ from input_backend import (
     is_escape_down,
     press_hotkey,
 )
-from controls_backend import enumerate_window_controls
+from .controls_backend import enumerate_window_controls
 
-from configuration import (
+from .configuration import (
     KEYEVENTF_KEYUP,
     MOUSEEVENTF_LEFTDOWN,
     MOUSEEVENTF_LEFTUP,
@@ -89,9 +91,9 @@ from configuration import (
     SCREENSHOT_RULER_STEP_PX,
     SCREENSHOT_RULER_MAJOR_STEP_PX,
 )
-from win32_api import UINT, hwnd
-import win32_api as api
-from screenshot_render import (
+from .win32_api import UINT, hwnd
+from . import win32_api as api
+from .screenshot_render import (
     write_png,
     draw_text,
     add_screenshot_ruler,
@@ -104,11 +106,11 @@ from screenshot_render import (
     create_cursor_detail_screenshot,
     overlay_target_crosshair,
 )
-from selection import select_uia_control
+from .selection import select_uia_control
 
 
-DEFAULT_CONFIG_PATH = Path(__file__).resolve().with_name("settings.json")
-ACTION_STATE_PATH = Path(__file__).resolve().with_name(".action_state.json")
+DEFAULT_CONFIG_PATH = PROJECT_ROOT / "settings.json"
+ACTION_STATE_PATH = PROJECT_ROOT / ".action_state.json"
 CURRENT_ARGS = None
 
 
@@ -539,7 +541,7 @@ def screenshot_window(
         raise ActionError("WINDOW_CHANGED", "window changed while preparing screenshot")
     if cursor_crosshair and cursor_position() != screen_cursor:
         raise ActionError("CURSOR_MISMATCH", "cursor moved while preparing screenshot")
-    screenshots_dir = Path(__file__).resolve().with_name("screenshots")
+    screenshots_dir = PROJECT_ROOT / "screenshots"
     screenshots_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     path = screenshots_dir / f"screenshot_{timestamp}_window_{window_id}.png"
@@ -815,6 +817,7 @@ def run_drag(args):
         except ActionError as exc:
             preconditions.append({"code": exc.code, "message": str(exc)})
         return {"ok": True, "mode": "mouse-dry-run", "planned_action": "drag", "dry_run": True,
+                "smooth_move": True,
                 "window_id": window_id, "button": args.drag_button, "screen_start": start,
                 "screen_destination": destination, "sequence": ["button-down", "move", "button-up"],
                 "executable": not preconditions, "preconditions": preconditions}
@@ -865,7 +868,7 @@ def read_text(args: argparse.Namespace) -> str:
 
 
 def load_settings(path: str) -> dict[str, int]:
-    import uia_runtime
+    from . import uia_runtime
     settings = DEFAULT_SETTINGS.copy()
     config_path = Path(path)
 
@@ -891,8 +894,10 @@ def load_settings(path: str) -> dict[str, int]:
 
 
 def apply_settings(args: argparse.Namespace, *, controlled: bool = False) -> None:
+    args.profile_requested_smooth = args.smooth_move
+    args.profile_requested_cursor = args.uia_cursor_follow
     settings = load_settings(args.config)
-    import uia_runtime
+    from . import uia_runtime
     uia_runtime.apply_settings(args, settings)
     if settings["mcp_smooth_move_enabled"] not in (0, 1):
         raise ValueError("mcp_smooth_move_enabled must be 0 or 1")
@@ -976,6 +981,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Inspect Windows applications and perform verified desktop actions."
     )
+    from .release_info import add_arguments
+    add_arguments(parser)
     parser.add_argument(
         "--list-windows",
         action="store_true",
@@ -1025,6 +1032,9 @@ def parse_args() -> argparse.Namespace:
     sessions.add_argument("--session-heartbeat", action="store_true", help="Renew an existing activity session while reviewing screenshots.")
     parser.add_argument("--session-timeout-s", type=int, help="Idle timeout for --session-start (default: activity_session_timeout_s, 120 seconds).")
     parser.add_argument("--session-owner-pid", type=int, help="For --session-start: also end when this long-lived controller process exits.")
+    from .interaction_profiles import PROFILES
+    parser.add_argument("--profile", choices=PROFILES,
+                        help="For --session-start: enforce human input, visual UIA, or background UIA for the whole session. Omit for legacy behavior.")
     frames = parser.add_mutually_exclusive_group()
     frames.add_argument("--activity-frame", dest="activity_frame", action="store_true", help="Show an activity frame during an action (enabled by default).")
     frames.add_argument("--no-activity-frame", dest="activity_frame", action="store_false", help="Do not create a frame for this action; an existing session remains active.")
@@ -1283,13 +1293,17 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--dry-run", action="store_true", help="Return a plan without input, window changes, or file writes.")
     parser.add_argument("--quiet", action="store_true", help="Do not write progress to stderr.")
-    import uia_runtime
+    from . import uia_runtime
     uia_runtime.add_arguments(parser)
+    from .image_runtime import add_help as add_image_help
+    add_image_help(parser)
     return parser.parse_args()
 
 
 def validate_args(args: argparse.Namespace) -> None:
-    import uia_runtime
+    if args.update_timeout_s is not None:
+        raise ValueError('--update-timeout-s requires --check-updates as a separate command')
+    from . import uia_runtime
     uia_runtime.validate(args)
     if args.activity_frame_gradient_enabled not in (0, 1):
         raise ValueError("activity_frame_gradient_enabled must be 0 or 1")
@@ -2087,10 +2101,20 @@ def main() -> int:
     controller = None
     operation_started = time.monotonic()
     try:
-        from controller_runtime import from_environment, check_recovery
+        from .controller_runtime import from_environment, check_recovery
         controller = from_environment()
+        from .release_info import run_cli
+        information = run_cli(sys.argv[1:], check_cancelled=controller.check if controller else lambda: None)
+        if information is not None:
+            return information
+        from .image_runtime import run_cli as run_image_cli
+        image_result = run_image_cli(sys.argv[1:], controller=controller)
+        if image_result is not None:
+            return image_result
         args = parse_args()
         apply_settings(args, controlled=controller is not None)
+        from . import interaction_profiles
+        interaction_profiles.prepare(args, None if args.session_start else bound_session(ACTION_STATE_PATH.parent))
         validate_args(args)
         CURRENT_ARGS = args
         args.controller = controller
@@ -2103,10 +2127,11 @@ def main() -> int:
                 controller.verify_session(args.expected_session)
         if window_mode(args) in SESSION_MODES:
             operation = Cancellation(is_escape_down, enabled=not args.no_abort_key)
+            operation.interaction_profile = args.interaction_profile
             operation.external_check = controller.check if controller else None
             result = session_command(args, ACTION_STATE_PATH.parent, check_cancelled=operation.check)
         elif window_mode(args) in {"uia_control_state", "uia_wait_state", "uia_action", "wait_ms"}:
-            import uia_runtime
+            from . import uia_runtime
             args.operation_started = operation_started
             result = uia_runtime.execute(args, sys.modules[__name__])
         elif args.dry_run:
@@ -2124,6 +2149,7 @@ def main() -> int:
                 }
         elif window_mode(args) in READ_MODES:
             operation = Cancellation(is_escape_down, enabled=not args.no_abort_key)
+            operation.interaction_profile = args.interaction_profile
             operation.external_check = controller.check if controller else None
             operation.guard = check_selected_window
             with activity_scope(args, ACTION_STATE_PATH.parent, operation), operation_session(operation):
@@ -2139,6 +2165,7 @@ def main() -> int:
                     if controller and args.requires_target:
                         controller.begin_input(ACTION_STATE_PATH.parent)
                     operation = Cancellation(is_escape_down, enabled=not args.no_abort_key)
+                    operation.interaction_profile = args.interaction_profile
                     operation.external_check = controller.check if controller else None
                     operation.guard = check_selected_window
                     with activity_scope(args, ACTION_STATE_PATH.parent, operation,
@@ -2160,6 +2187,7 @@ def main() -> int:
                 finally:
                     if controller:
                         controller.finish_input(sys.exc_info()[1])
+        result['interaction'] = interaction_profiles.describe(args.interaction_profile, args)
         write_result(result)
         return 2 if result.get("aborted") else 0 if result.get("ok") else 1
     except (ActionAborted, KeyboardInterrupt) as exc:
@@ -2251,7 +2279,8 @@ def resolve_action_target(args):
         return
     if window_mode(args) in SESSION_MODES or args.list_windows or args.active_window:
         return
-    session = bound_session(ACTION_STATE_PATH.parent)
+    session = (args.profile_session_state if hasattr(args, 'profile_session_state')
+               else bound_session(ACTION_STATE_PATH.parent))
     controller = getattr(args, "controller", None)
     if controller is not None and controller.payload.get("session_id") is not None:
         controller.verify_session(session.get("session_id") if session else None)

@@ -14,15 +14,21 @@ import uuid
 
 import anyio
 
-from action_runtime import ActionError, ActionLock
-from controller_runtime import ControllerEvent, ENVIRONMENT_KEY, MAX_IMAGE_BYTES, RECOVERY_NAME
-from mcp_contract import SPECS, build_command
-from worker_client import UIA_RECOVERY_NAME
+from .project_paths import PROJECT_ROOT
 
-SERVER_VERSION = "0.3.0"
-READ_TOOLS = {"desktop_status", "list_windows", "active_window", "cursor_position", "capture_window",
+from .action_runtime import ActionError, ActionLock
+from .controller_runtime import ControllerEvent, ENVIRONMENT_KEY, MAX_IMAGE_BYTES, RECOVERY_NAME
+from .mcp_contract import SPECS, build_command
+from .image_contract import IMAGE_TOOLS, SAVE_TOOLS
+from .worker_client import UIA_RECOVERY_NAME
+
+from .release_info import current_version
+
+SERVER_VERSION = current_version()
+READ_TOOLS = {"desktop_status", "check_updates", "list_windows", "active_window", "cursor_position", "capture_window",
               "preview_target", "list_controls", "wait_control", "session_status", "get_control_state", "wait_control_state", "wait"}
 MAX_OUTPUT = 16 * 1024 * 1024
+READ_TOOLS.update(IMAGE_TOOLS)
 
 
 def failure(code, message, **details):
@@ -42,13 +48,14 @@ class Job:
 class Bridge:
     def __init__(self, directory=None, *, read_only=False, max_image_bytes=MAX_IMAGE_BYTES,
                  child_command=None, grace_seconds=5):
-        self.directory = Path(directory or Path(__file__).parent).resolve()
+        self.directory = Path(directory or PROJECT_ROOT).resolve()
         self.read_only = read_only
         self.max_image_bytes = max_image_bytes
         self.child_command = child_command or [sys.executable, "-B", str(self.directory / "type_text.py")]
         self.grace_seconds = grace_seconds
         self.jobs = {}
         self.active = None
+        self.image_active = None
         self.last = None
         self.owned_session = None
         self.verifications = {}
@@ -57,11 +64,23 @@ class Bridge:
         self.lock = threading.RLock()
 
     def status(self):
+        from .interaction_profiles import PROFILES
+        from .image_store import settings as image_settings
+        try:
+            image_options = image_settings(self.directory)
+            image_limits = {key: image_options[key] for key in ('image_max_pixels', 'image_max_inputs',
+                'image_working_max_mib', 'image_temporary_max_mib', 'image_processing_timeout_s', 'image_region_ttl_s')}
+        except (ValueError, OSError):
+            image_limits = {'error_code': 'IMAGE_ARGUMENT_INVALID'}
         with self.lock:
             return {"ok": True, "mode": "mcp-status", "server_version": SERVER_VERSION,
                     "mcp_version": importlib.metadata.version("mcp"), "python_version": sys.version.split()[0],
                     "read_only": self.read_only, "uia_available": importlib.util.find_spec("uiautomation") is not None,
-                    "busy": self.active is not None, "active_operation": self.active,
+                    "interaction_profiles": list(PROFILES),
+                    "images_available": importlib.util.find_spec('PIL') is not None,
+                    "image_limits": image_limits,
+                    "active_image_operation": self.image_active,
+                    "busy": self.active is not None or self.image_active is not None, "active_operation": self.active,
                     "last_operation": self.last, "owned_session_id": self.owned_session,
                     "input_recovery_required": self.uncertain or (self.directory / RECOVERY_NAME).exists(),
                     "uia_recovery_required": (self.directory / UIA_RECOVERY_NAME).exists(),
@@ -91,7 +110,16 @@ class Bridge:
         return record["digest"]
 
     async def call(self, name, arguments):
+        if name in IMAGE_TOOLS:
+            from .image_store import settings as image_settings
+            options = image_settings(self.directory)
+            arguments = dict(arguments)
+            arguments.setdefault('operation_timeout_s', options['image_processing_timeout_s'])
+            if name == 'preview_region':
+                arguments.setdefault('show_overlay', bool(options['image_overlay_enabled']))
         command = build_command(name, arguments)
+        if self.read_only and name == 'preview_region' and arguments.get('show_overlay'):
+            return failure('READ_ONLY', 'read-only server forbids showing a screen region frame'), []
         if self.read_only and name not in READ_TOOLS:
             return failure("READ_ONLY", "this server exposes observation tools only"), []
         if name == "desktop_status":
@@ -103,7 +131,12 @@ class Bridge:
         with self.lock:
             if self.closing:
                 return failure("SERVER_CLOSING", "the MCP connection is closing"), []
-            independent = name in {"session_status", "session_end", "session_heartbeat"}
+            independent = name in {"session_status", "session_end", "session_heartbeat", "check_updates"}
+            image_lane = name in IMAGE_TOOLS and name != 'capture_image' and not (name == 'preview_region' and arguments.get('show_overlay'))
+            if image_lane:
+                independent = True
+                if self.image_active is not None:
+                    return failure('BUSY', 'another image operation is running; no work was queued'), []
             if self.active is not None and not independent:
                 return failure("BUSY", "another MCP operation is running; no action was queued"), []
             if command.changes_desktop and not command.dry_run and (self.directory / UIA_RECOVERY_NAME).exists():
@@ -118,10 +151,16 @@ class Bridge:
                 return failure("INPUT_RECOVERY_REQUIRED", "input cleanup was not confirmed",
                                required_next_step="inspect held keys/buttons, then manually remove " + RECOVERY_NAME), []
             controller = ControllerEvent(session_id=command.session_id, state_digest=digest,
+                                         read_only=self.read_only,
                                          max_image_bytes=self.max_image_bytes)
+            if name in SAVE_TOOLS and not command.dry_run:
+                arguments.setdefault('request_id', controller.payload['request_id'])
+                command.text = json.dumps(arguments, allow_nan=False)
             job = Job(command, controller)
             request_id = controller.payload["request_id"]
             self.jobs[request_id] = job
+            if image_lane:
+                self.image_active = {'request_id': request_id, 'tool': name}
             if not independent:
                 self.active = {"request_id": request_id, "tool": name}
         try:
@@ -186,12 +225,20 @@ class Bridge:
                 if cancelled_at is not None and time.monotonic() - cancelled_at > self.grace_seconds:
                     process.kill()  # Only our child; cleanup is explicitly marked unknown below.
                     process.wait(timeout=2)
+                    if command.name == 'check_updates':
+                        return failure('UPDATE_TIMEOUT' if job.interrupted == 'operation-timeout' else 'UPDATE_CHECK_CANCELLED',
+                                       'release check did not finish; no desktop action or installation was performed',
+                                       update_available=None)
+                    if command.name in IMAGE_TOOLS:
+                        return self._image_failure(job, 'image child did not confirm cancellation')
                     return failure("ACTION_OUTCOME_UNKNOWN", "child did not confirm graceful cancellation",
                                    required_next_step="inspect the window and held input; never replay this action automatically")
                 time.sleep(0.02)
             for reader in readers:
                 reader.join(timeout=2)
             if any(reader.is_alive() for reader in readers) or overflow.is_set():
+                if command.name in IMAGE_TOOLS:
+                    return self._image_failure(job, 'image response was incomplete or too large')
                 return failure("ACTION_OUTCOME_UNKNOWN", "child response was incomplete or too large")
             try:
                 result = json.loads(buffers[0].decode("utf-8"))
@@ -201,6 +248,8 @@ class Bridge:
                     raise ValueError("inconsistent child exit status")
                 return result
             except (UnicodeError, ValueError):
+                if command.name in IMAGE_TOOLS:
+                    return self._image_failure(job, 'image child did not return a valid result')
                 return failure("ACTION_OUTCOME_UNKNOWN", "child did not return a valid CLI result")
         finally:
             if process.poll() is None:
@@ -212,7 +261,14 @@ class Bridge:
                     process.wait(timeout=2)
             writer.join(timeout=0.2)
 
+    def _image_failure(self, job, message):
+        arguments = json.loads(job.command.text or '{}')
+        return failure('IMAGE_TIMEOUT' if job.interrupted == 'operation-timeout' else 'IMAGE_OPERATION_INTERRUPTED',
+            message, saved=None, request_id=arguments.get('request_id'),
+            required_next_step='read_image(request_id) to inspect a saved result; do not repeat desktop input')
+
     def _execute(self, job):
+        result = None
         try:
             result = self._run_process(job)
             images = result.pop("_controller_images", [])
@@ -247,21 +303,33 @@ class Bridge:
                 result["controller_interrupted"] = job.interrupted
             job.result, job.images = result, images
         except Exception:
-            job.result = failure("ACTION_OUTCOME_UNKNOWN", "controller could not confirm the operation result",
+            job.result = self._image_failure(job, 'could not confirm image result') if job.command.name in IMAGE_TOOLS else failure("ACTION_OUTCOME_UNKNOWN", "controller could not confirm the operation result",
                                  required_next_step="inspect the window before another action")
+            if job.command.name in IMAGE_TOOLS and isinstance(result, dict) and result.get('saved'):
+                job.result.update({key: result[key] for key in ('image_id', 'image_path', 'metadata_path', 'request_id', 'saved') if key in result})
+                job.result['delivery'] = {'delivered': False, 'error_code': 'IMAGE_DELIVERY_FAILED'}
         finally:
             if job.result is None:
-                job.result = failure("ACTION_OUTCOME_UNKNOWN", "operation ended without a result")
+                job.result = self._image_failure(job, 'image operation ended without a result') if job.command.name in IMAGE_TOOLS else failure("ACTION_OUTCOME_UNKNOWN", "operation ended without a result")
+            if (job.command.name == 'act_on_control' and job.result.get('error_code') == 'ACTION_OUTCOME_UNKNOWN'
+                    and 'cursor_follow' not in job.result):
+                enabled = True if '--uia-cursor-follow' in job.command.argv else False if '--no-uia-cursor-follow' in job.command.argv else None
+                job.result['cursor_follow'] = {'enabled': enabled, 'status': 'unknown', 'steps': None,
+                    'duration_ms': None, 'pause_ms': None, 'final_position': None}
             if (job.command.changes_desktop and not job.command.dry_run
                     and (job.result.get("error_code") == "ACTION_OUTCOME_UNKNOWN" or job.result.get("release_errors"))):
                 self._mark_uncertain(job)
             with self.lock:
                 self.last = {"tool": job.command.name, **{key: job.result[key] for key in
                              ("ok", "error_code", "completed", "typed_chars", "aborted", "action_completed", "controller_interrupted",
-                              "execution_status", "effect_status", "completed_calls", "changed", "operation_id") if key in job.result}}
+                              "execution_status", "effect_status", "completed_calls", "changed", "operation_id", "cursor_follow", "interaction",
+                              "current_version", "latest_version", "update_available", "status", 'image_id', 'image_path',
+                              'metadata_path', 'request_id', 'saved', 'delivery') if key in job.result}}
                 request_id = job.controller.payload["request_id"]
                 if self.active and self.active["request_id"] == request_id:
                     self.active = None
+                if self.image_active and self.image_active['request_id'] == request_id:
+                    self.image_active = None
                 self.jobs.pop(request_id, None)
                 job.controller.close()
                 job.done.set()

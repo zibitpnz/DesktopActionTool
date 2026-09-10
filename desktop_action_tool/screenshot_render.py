@@ -3,7 +3,7 @@ from __future__ import annotations
 import struct
 import zlib
 from pathlib import Path
-from configuration import (
+from .configuration import (
     SCREENSHOT_CROSSHAIR_BGR,
     SCREENSHOT_CROSSHAIR_ALPHA,
     SCREENSHOT_CROSSHAIR_HALF_WIDTH,
@@ -24,7 +24,7 @@ from configuration import (
     SCREENSHOT_RULER_TEXT_BGR,
     PIXEL_FONT,
 )
-from geometry import clamp
+from .geometry import clamp
 
 def png_chunk(chunk_type: bytes, data: bytes) -> bytes:
     checksum = zlib.crc32(chunk_type)
